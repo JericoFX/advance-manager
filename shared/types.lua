@@ -1,0 +1,3 @@
+-- This file is intentionally left minimal
+-- Job types and permissions are dynamically loaded from QBCore.Shared.Jobs
+-- Business types are determined by the job_name in the database
