@@ -28,6 +28,8 @@ Advanced Business Management System for FiveM QBCore
 ## Exports
 
 ### Server Exports
+
+#### Business Management
 - `createBusiness(name, owner, jobName, startingFunds, metadata)` - Create a new business
 - `getBusinessById(businessId)` - Get business by ID
 - `getBusinessByJob(jobName)` - Get business by job name
@@ -37,6 +39,15 @@ Advanced Business Management System for FiveM QBCore
 - `getBusinessFunds(businessId)` - Get current fund amount
 - `hasBusinessPermission(citizenId, businessId, permission)` - Check permissions
 - `isBusinessBoss(citizenId, businessId)` - Check if citizen is boss
+
+#### Employee Management
+- `getBusinessEmployees(businessId)` - Get all employees for a business (from database)
+- `getBusinessEmployeesFromCache(businessId)` - Get all employees for a business (from cache)
+- `getEmployeeByBusinessAndCitizen(businessId, citizenId)` - Get specific employee data
+- `getAllEmployeesCache()` - Get complete employee cache (GlobalState.BusinessEmployees)
+- `isEmployeeOfBusiness(businessId, citizenId)` - Check if citizen is employee of business
+- `getEmployeeGrade(businessId, citizenId)` - Get employee's grade/level
+- `refreshEmployeeCache(businessId)` - Refresh cache for specific business
 
 ## Database Tables
 
@@ -75,4 +86,53 @@ exports['advance-manager']:updateBusinessFunds(businessId, 5000, false)
 
 -- Withdraw funds (remove money)
 exports['advance-manager']:updateBusinessFunds(businessId, 2000, true)
+
+-- Get employees from cache (fast, no database query)
+local employees = exports['advance-manager']:getBusinessEmployeesFromCache(businessId)
+
+-- Check if player is employee of business
+local isEmployee = exports['advance-manager']:isEmployeeOfBusiness(businessId, 'ABC12345')
+
+-- Get employee grade
+local grade = exports['advance-manager']:getEmployeeGrade(businessId, 'ABC12345')
+
+-- Get specific employee data
+local employee = exports['advance-manager']:getEmployeeByBusinessAndCitizen(businessId, 'ABC12345')
+if employee then
+    print('Employee:', employee.name, 'Grade:', employee.grade, 'Wage:', employee.wage)
+end
+
+-- Access complete employee cache (all businesses)
+local allEmployees = exports['advance-manager']:getAllEmployeesCache()
+for businessId, employees in pairs(allEmployees) do
+    print('Business', businessId, 'has', #employees, 'employees')
+end
+```
+
+## Employee Cache System
+
+The advance-manager includes a high-performance employee cache system that:
+
+- **Loads on startup**: All employees are loaded into GlobalState.BusinessEmployees
+- **Auto-updates**: Cache is refreshed automatically when employees are hired, fired, or updated
+- **Fast access**: Other resources can access employee data without database queries
+- **Real-time sync**: All clients receive updates via GlobalState synchronization
+
+### Cache Structure
+
+```lua
+GlobalState.BusinessEmployees = {
+    ['1'] = { -- Business ID
+        {
+            id = 1,
+            citizenid = 'ABC12345',
+            grade = 2,
+            wage = 50,
+            name = 'John Doe',
+            business_name = 'Downtown Mechanics',
+            job_name = 'mechanic',
+            last_updated = 1642694400
+        }
+    }
+}
 ```

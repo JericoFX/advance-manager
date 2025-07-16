@@ -1,5 +1,8 @@
 QBCore = exports['qb-core']:GetCoreObject()
 
+-- Initialize GlobalState for employees cache
+GlobalState.BusinessEmployees = GlobalState.BusinessEmployees or {}
+
 -- Load modules
 local Business = require 'server.modules.business'
 local Employees = require 'server.modules.employees'
@@ -31,6 +34,9 @@ CreateThread(function()
     ]])
 
     print('[advance-manager] Database tables initialized.')
+    
+    -- Load all employees to cache
+    Employees.LoadAllToCache()
 end)
 
 -- Admin commands
@@ -112,6 +118,35 @@ end)
 
 exports('isBusinessBoss', function(citizenId, businessId)
     return Business.IsBoss(citizenId, businessId)
+end)
+
+-- Employee exports
+exports('getBusinessEmployees', function(businessId)
+    return Employees.GetAll(businessId)
+end)
+
+exports('getBusinessEmployeesFromCache', function(businessId)
+    return Employees.GetFromCache(businessId)
+end)
+
+exports('getEmployeeByBusinessAndCitizen', function(businessId, citizenId)
+    return Employees.GetByBusinessAndCitizen(businessId, citizenId)
+end)
+
+exports('getAllEmployeesCache', function()
+    return GlobalState.BusinessEmployees
+end)
+
+exports('isEmployeeOfBusiness', function(businessId, citizenId)
+    return Employees.IsEmployeeOfBusiness(businessId, citizenId)
+end)
+
+exports('getEmployeeGrade', function(businessId, citizenId)
+    return Employees.GetEmployeeGrade(businessId, citizenId)
+end)
+
+exports('refreshEmployeeCache', function(businessId)
+    return Employees.RefreshCache(businessId)
 end)
 
 -- Employee management callbacks
