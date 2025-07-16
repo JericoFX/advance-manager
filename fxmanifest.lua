@@ -18,13 +18,22 @@ server_scripts {
 }
 
 client_scripts {
-    'client/init.lua'
+    'client/init.lua',
+    'client/ui-handler.lua'
 }
 
 dependencies {
     'ox_lib',
     'oxmysql',
     'qb-core'
+}
+
+ui_page 'ui/index.html'
+
+files {
+    'ui/index.html',
+    'ui/css/*.css',
+    'ui/js/*.js'
 }
 
 provide 'advance-manager'

@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Business Manager</title>
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="css/main.css">
+</head>
+<body>
+    <div class="container">
+        <!-- Main Panel -->
+        <div class="business-panel" id="businessPanel">
+            <div class="panel-header">
+                <div class="job-title" id="jobTitle">
+                    <i class="fas fa-briefcase"></i>
+                    <span>Police Department</span>
+                </div>
+                <div class="user-role" id="userRole">
+                    <span class="role-badge boss">Boss</span>
+                    <span class="user-name">John Doe</span>
+                </div>
+            </div>
+
+            <div class="panel-content">
+                <!-- Business Info Card -->
+                <div class="card business-info">
+                    <div class="card-header">
+                        <i class="fas fa-building"></i>
+                        <h3>Business Information</h3>
+                    </div>
+                    <div class="card-body">
+                        <div class="info-row">
+                            <span class="label">Business Name:</span>
+                            <span class="value" id="businessName">Los Santos Police</span>
+                        </div>
+                        <div class="info-row">
+                            <span class="label">Current Funds:</span>
+                            <span class="value money" id="businessFunds">$45,230</span>
+                        </div>
+                        <div class="info-row">
+                            <span class="label">Total Employees:</span>
+                            <span class="value" id="totalEmployees">12</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Financial Management Card -->
+                <div class="card financial-management">
+                    <div class="card-header">
+                        <i class="fas fa-dollar-sign"></i>
+                        <h3>Financial Management</h3>
+                    </div>
+                    <div class="card-body">
+                        <div class="button-group">
+                            <button class="btn btn-primary" id="depositBtn">
+                                <i class="fas fa-plus"></i>
+                                <span>Deposit Funds</span>
+                            </button>
+                            <button class="btn btn-secondary" id="withdrawBtn">
+                                <i class="fas fa-minus"></i>
+                                <span>Withdraw Funds</span>
+                            </button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Employee Management Card -->
+                <div class="card employee-management">
+                    <div class="card-header">
+                        <i class="fas fa-users"></i>
+                        <h3>Employee Management</h3>
+                    </div>
+                    <div class="card-body">
+                        <div class="button-group">
+                            <button class="btn btn-success" id="hireBtn">
+                                <i class="fas fa-user-plus"></i>
+                                <span>Hire Employee</span>
+                            </button>
+                            <button class="btn btn-info" id="manageBtn">
+                                <i class="fas fa-cogs"></i>
+                                <span>Manage Employees</span>
+                            </button>
+                        </div>
+                        
+                        <div class="employees-list" id="employeesList">
+                            <!-- Employee items will be populated dynamically -->
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="panel-footer">
+                <button class="btn btn-danger close-btn" id="closeBtn">
+                    <i class="fas fa-times"></i>
+                    <span>Close</span>
+                </button>
+            </div>
+        </div>
+
+        <!-- Overlay -->
+        <div class="overlay" id="overlay"></div>
+    </div>
+
+    <!-- Modal for inputs -->
+    <div class="modal" id="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3 id="modalTitle">Action</h3>
+                <button class="modal-close" id="modalClose">
+                    <i class="fas fa-times"></i>
+                </button>
+            </div>
+            <div class="modal-body" id="modalBody">
+                <!-- Dynamic content -->
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" id="modalCancel">Cancel</button>
+                <button class="btn btn-primary" id="modalConfirm">Confirm</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Toast notifications -->
+    <div class="toast-container" id="toastContainer"></div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jquery/3.7.1/jquery.min.js"></script>
+    <script src="js/main.js"></script>
+    <script src="js/business.js"></script>
+    <script src="js/employees.js"></script>
+    <script src="js/fivem-callbacks.js"></script>
+</body>
+</html>
