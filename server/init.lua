@@ -1,11 +1,37 @@
 QBCore = exports['qb-core']:GetCoreObject()
 
--- Initialize GlobalState for employees cache
-GlobalState.BusinessEmployees = GlobalState.BusinessEmployees or {}
+-- Initialize server-side cache for employees (more secure than GlobalState)
+local EmployeeCache = {}
 
 -- Load modules
 local Business = require 'server.modules.business'
 local Employees = require 'server.modules.employees'
+
+-- Function to get employee cache
+local function GetEmployeeCache()
+    return EmployeeCache
+end
+
+-- Function to set employee cache
+local function SetEmployeeCache(cache)
+    EmployeeCache = cache
+end
+
+-- Function to get employees for specific business from cache
+local function GetEmployeesFromCache(businessId)
+    return EmployeeCache[tostring(businessId)] or {}
+end
+
+-- Function to set employees for specific business in cache
+local function SetEmployeesInCache(businessId, employees)
+    EmployeeCache[tostring(businessId)] = employees
+end
+
+-- Make cache functions available to employees module
+Employees.GetCache = GetEmployeeCache
+Employees.SetCache = SetEmployeeCache
+Employees.GetFromCache = GetEmployeesFromCache
+Employees.SetInCache = SetEmployeesInCache
 
 CreateThread(function()
     MySQL.query([[
@@ -134,7 +160,7 @@ exports('getEmployeeByBusinessAndCitizen', function(businessId, citizenId)
 end)
 
 exports('getAllEmployeesCache', function()
-    return GlobalState.BusinessEmployees
+    return EmployeeCache
 end)
 
 exports('isEmployeeOfBusiness', function(businessId, citizenId)

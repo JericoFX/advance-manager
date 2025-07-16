@@ -44,7 +44,7 @@ Advanced Business Management System for FiveM QBCore
 - `getBusinessEmployees(businessId)` - Get all employees for a business (from database)
 - `getBusinessEmployeesFromCache(businessId)` - Get all employees for a business (from cache)
 - `getEmployeeByBusinessAndCitizen(businessId, citizenId)` - Get specific employee data
-- `getAllEmployeesCache()` - Get complete employee cache (GlobalState.BusinessEmployees)
+- `getAllEmployeesCache()` - Get complete employee cache (server-side only)
 - `isEmployeeOfBusiness(businessId, citizenId)` - Check if citizen is employee of business
 - `getEmployeeGrade(businessId, citizenId)` - Get employee's grade/level
 - `refreshEmployeeCache(businessId)` - Refresh cache for specific business
@@ -111,17 +111,26 @@ end
 
 ## Employee Cache System
 
-The advance-manager includes a high-performance employee cache system that:
+The advance-manager includes a high-performance **server-side** employee cache system that:
 
-- **Loads on startup**: All employees are loaded into GlobalState.BusinessEmployees
+- **Secure**: Cache is stored server-side only, not accessible to clients
+- **Loads on startup**: All employees are loaded into server memory
 - **Auto-updates**: Cache is refreshed automatically when employees are hired, fired, or updated
 - **Fast access**: Other resources can access employee data without database queries
-- **Real-time sync**: All clients receive updates via GlobalState synchronization
+- **Performance**: Eliminates repetitive database queries
+
+### Security Features
+
+- **Server-only cache**: Employee data is not exposed to clients via GlobalState
+- **Export-based access**: Other resources access data through secure exports
+- **Permission validation**: All access is validated server-side
+- **No client manipulation**: Clients cannot read or modify employee data
 
 ### Cache Structure
 
 ```lua
-GlobalState.BusinessEmployees = {
+-- Server-side cache (not accessible to clients)
+EmployeeCache = {
     ['1'] = { -- Business ID
         {
             id = 1,

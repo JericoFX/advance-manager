@@ -33,15 +33,13 @@ function Employees.LoadAllToCache()
         end
     end
     
-    GlobalState.BusinessEmployees = cache
-    print('[advance-manager] Loaded ' .. (result and #result or 0) .. ' employees to cache')
+    -- Use server-side cache instead of GlobalState for security
+    Employees.SetCache(cache)
+    print('[advance-manager] Loaded ' .. (result and #result or 0) .. ' employees to secure server cache')
 end
 
--- Función para obtener empleados del caché
-function Employees.GetFromCache(businessId)
-    local cache = GlobalState.BusinessEmployees
-    return cache[tostring(businessId)] or {}
-end
+-- Esta función se define en el init.lua y se asigna dinámicamente
+-- Se mantiene aquí como placeholder para documentación
 
 -- Función para actualizar el caché de un negocio específico
 function Employees.RefreshCache(businessId)
@@ -54,14 +52,13 @@ function Employees.RefreshCache(businessId)
         ORDER BY be.grade DESC
     ]], {businessId})
     
-    local cache = GlobalState.BusinessEmployees
     local businessIdStr = tostring(businessId)
-    cache[businessIdStr] = {}
+    local employees = {}
     
     if result then
         for _, employee in pairs(result) do
             local charinfo = json.decode(employee.charinfo or '{}')
-            table.insert(cache[businessIdStr], {
+            table.insert(employees, {
                 id = employee.id,
                 citizenid = employee.citizenid,
                 grade = employee.grade,
@@ -74,8 +71,9 @@ function Employees.RefreshCache(businessId)
         end
     end
     
-    GlobalState.BusinessEmployees = cache
-    return cache[businessIdStr]
+    -- Use server-side cache instead of GlobalState for security
+    Employees.SetInCache(businessId, employees)
+    return employees
 end
 
 -- Función para obtener un empleado específico por negocio y citizen
