@@ -94,8 +94,8 @@ exports('getBusinessByOwner', function(citizenId)
     return Business.GetByOwner(citizenId)
 end)
 
-exports('updateBusinessFunds', function(businessId, amount)
-    return Business.UpdateFunds(businessId, amount)
+exports('updateBusinessFunds', function(businessId, amount, isWithdrawal)
+    return Business.UpdateFunds(businessId, amount, isWithdrawal)
 end)
 
 exports('setBusinessFunds', function(businessId, amount)
@@ -233,7 +233,7 @@ lib.callback.register('advance-manager:depositFunds', function(source, businessI
     -- Remove money from player
     if Player.Functions.RemoveMoney('cash', amount) then
         -- Add money to business
-        if Business.UpdateFunds(businessId, amount) then
+        if Business.UpdateFunds(businessId, amount, false) then
             return true, 'Funds deposited successfully'
         else
             -- If business update fails, return money to player
@@ -264,7 +264,7 @@ lib.callback.register('advance-manager:withdrawFunds', function(source, business
     end
     
     -- Remove money from business
-    if Business.UpdateFunds(businessId, -amount) then
+    if Business.UpdateFunds(businessId, amount, true) then
         -- Add money to player
         Player.Functions.AddMoney('cash', amount)
         return true, 'Funds withdrawn successfully'

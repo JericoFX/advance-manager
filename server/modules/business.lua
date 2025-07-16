@@ -80,8 +80,9 @@ function Business.GetByOwner(citizenId)
     return businesses
 end
 
-function Business.UpdateFunds(businessId, amount)
-    local result = MySQL.update.await('UPDATE businesses SET funds = funds + ? WHERE id = ?', {amount, businessId})
+function Business.UpdateFunds(businessId, amount, isWithdrawal)
+    local finalAmount = isWithdrawal and -amount or amount
+    local result = MySQL.update.await('UPDATE businesses SET funds = funds + ? WHERE id = ?', {finalAmount, businessId})
     return result > 0
 end
 

@@ -32,7 +32,7 @@ Advanced Business Management System for FiveM QBCore
 - `getBusinessById(businessId)` - Get business by ID
 - `getBusinessByJob(jobName)` - Get business by job name
 - `getBusinessByOwner(citizenId)` - Get all businesses owned by a citizen
-- `updateBusinessFunds(businessId, amount)` - Add/subtract funds
+- `updateBusinessFunds(businessId, amount, isWithdrawal)` - Add/subtract funds with withdrawal flag
 - `setBusinessFunds(businessId, amount)` - Set exact fund amount
 - `getBusinessFunds(businessId)` - Get current fund amount
 - `hasBusinessPermission(citizenId, businessId, permission)` - Check permissions
@@ -70,6 +70,9 @@ local success, businessId = exports['advance-manager']:createBusiness(
 -- Check if player is boss
 local isBoss = exports['advance-manager']:isBusinessBoss('ABC12345', businessId)
 
--- Update business funds
-exports['advance-manager']:updateBusinessFunds(businessId, 5000)
+-- Deposit funds (add money)
+exports['advance-manager']:updateBusinessFunds(businessId, 5000, false)
+
+-- Withdraw funds (remove money)
+exports['advance-manager']:updateBusinessFunds(businessId, 2000, true)
 ```
