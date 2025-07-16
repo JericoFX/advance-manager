@@ -76,7 +76,7 @@ const BusinessAPI = {
     },
     
     // Contratar empleado
-    hireEmployee(playerId, grade, wage) {
+    hireEmployee(playerId, grade) {
         return new Promise((resolve, reject) => {
             setTimeout(() => {
                 // Simular verificación de jugador
@@ -93,24 +93,23 @@ const BusinessAPI = {
                     return;
                 }
                 
-                if (wage < 10 || wage > 100) {
-                    reject({ error: 'Invalid wage amount' });
-                    return;
-                }
+                // Simular wage según el grade (esto vendría del servidor)
+                const wagesByGrade = [25, 35, 45, 55, 75]; // Ejemplo de wages por grade
+                const assignedWage = wagesByGrade[grade];
                 
                 const newEmployee = {
                     id: this.currentBusiness.employees.length + 1,
                     name: randomName,
                     citizenid: `CID${Math.random().toString(36).substr(2, 9).toUpperCase()}`,
                     grade: grade,
-                    wage: wage
+                    wage: assignedWage
                 };
                 
                 this.currentBusiness.employees.push(newEmployee);
                 
                 resolve({ 
                     success: true, 
-                    message: `Successfully hired ${randomName}`,
+                    message: `Successfully hired ${randomName} at grade ${grade}`,
                     employee: newEmployee
                 });
             }, 1500);
@@ -281,16 +280,15 @@ if (typeof BusinessManager !== 'undefined') {
         async handleHire() {
             const playerId = parseInt($('#playerId').val());
             const grade = parseInt($('#gradeLevel').val());
-            const wage = parseInt($('#hourlyWage').val());
             
-            if (!playerId || !wage) {
-                this.showToast('Please fill all fields', 'error');
+            if (!playerId) {
+                this.showToast('Please enter a player ID', 'error');
                 return;
             }
             
             try {
                 this.showLoading('Hiring employee...');
-                const result = await BusinessAPI.hireEmployee(playerId, grade, wage);
+                const result = await BusinessAPI.hireEmployee(playerId, grade);
                 this.hideLoading();
                 
                 this.showToast(result.message, 'success');

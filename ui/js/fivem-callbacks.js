@@ -3,6 +3,21 @@ const FiveMCallbacks = {
     // Verificar si estamos en el entorno de FiveM
     isFiveM: typeof GetParentResourceName !== 'undefined',
     
+    // Lista de callbacks permitidos
+    allowedCallbacks: [
+        'advance-manager:getPlayerBusiness',
+        'advance-manager:depositFunds',
+        'advance-manager:withdrawFunds',
+        'advance-manager:hireEmployee',
+        'advance-manager:fireEmployee',
+        'advance-manager:getBusinessEmployees',
+        'advance-manager:updateEmployeeWage',
+        'advance-manager:updateEmployeeGrade',
+        'advance-manager:getNearestPlayer',
+        'advance-manager:getBusinessFunds',
+        'closeUI'
+    ],
+    
     // Inicializar callbacks
     init() {
         if (this.isFiveM) {
@@ -56,12 +71,11 @@ const FiveMCallbacks = {
             },
             
             // Contratar empleado
-            async hireEmployee(playerId, grade, wage) {
+            async hireEmployee(playerId, grade) {
                 return new Promise((resolve, reject) => {
                     this.performCallback('advance-manager:hireEmployee', { 
                         playerId, 
-                        grade, 
-                        wage 
+                        grade
                     }, (success, message) => {
                         if (success) {
                             resolve({ success: true, message: message });
@@ -252,11 +266,66 @@ const FiveMCallbacks = {
         });
     },
     
+    // Validar callback permitido
+    validateCallback(callbackName) {
+        return this.allowedCallbacks.includes(callbackName);
+    },
+    
+    // Validar datos de entrada
+    validateInput(data) {
+        if (typeof data !== 'object' || data === null) {
+            return false;
+        }
+        
+        // Validar campos numéricos
+        if (data.amount && (!Number.isInteger(data.amount) || data.amount <= 0)) {
+            return false;
+        }
+        
+        if (data.playerId && (!Number.isInteger(data.playerId) || data.playerId <= 0)) {
+            return false;
+        }
+        
+        if (data.grade !== undefined && (!Number.isInteger(data.grade) || data.grade < 0 || data.grade > 4)) {
+            return false;
+        }
+        
+        // wage ya no es validado aquí, se asigna automáticamente desde QBCore shared
+        
+        if (data.employeeId && (!Number.isInteger(data.employeeId) || data.employeeId <= 0)) {
+            return false;
+        }
+        
+        return true;
+    },
+    
     // Función auxiliar para realizar callbacks
     performCallback(callbackName, data, callback) {
+        // Validar callback
+        if (!this.validateCallback(callbackName)) {
+            console.error(`Security Alert: Unauthorized callback: ${callbackName}`);
+            if (callback) callback(false, 'Unauthorized callback');
+            return;
+        }
+        
+        // Validar datos
+        if (!this.validateInput(data)) {
+            console.error(`Security Alert: Invalid data for callback: ${callbackName}`);
+            if (callback) callback(false, 'Invalid data');
+            return;
+        }
+        
         if (this.isFiveM) {
+            // Verificar que estamos en el recurso correcto
+            const resourceName = GetParentResourceName();
+            if (resourceName !== 'advance-manager') {
+                console.error(`Security Alert: Invalid resource name: ${resourceName}`);
+                if (callback) callback(false, 'Invalid resource');
+                return;
+            }
+            
             // Usar POST para comunicar con FiveM endpoints
-            $.post(`https://${GetParentResourceName()}/${callbackName}`, JSON.stringify(data), callback);
+            $.post(`https://${resourceName}/${callbackName}`, JSON.stringify(data), callback);
         } else {
             // Modo navegador - usar datos mock
             console.log(`Mock callback: ${callbackName}`, data);
@@ -307,8 +376,35 @@ $(document).ready(function() {
     FiveMCallbacks.init();
 });
 
-// Funciones globales para FiveM
-window.toggleBusinessPanel = () => FiveMCallbacks.togglePanel();
-window.closeBusinessPanel = () => FiveMCallbacks.closePanel();
-window.showBusinessNotification = (message, type) => FiveMCallbacks.showNotification(message, type);
-window.updateBusinessInfo = (info) => FiveMCallbacks.updateBusinessInfo(info);
+// Funciones globales protegidas para FiveM
+window.toggleBusinessPanel = () => {
+    if (FiveMCallbacks.isFiveM) {
+        FiveMCallbacks.togglePanel();
+    } else {
+        console.warn('Function only available in FiveM environment');
+    }
+};
+
+window.closeBusinessPanel = () => {
+    if (FiveMCallbacks.isFiveM) {
+        FiveMCallbacks.closePanel();
+    } else {
+        console.warn('Function only available in FiveM environment');
+    }
+};
+
+window.showBusinessNotification = (message, type) => {
+    if (FiveMCallbacks.isFiveM && typeof message === 'string') {
+        FiveMCallbacks.showNotification(message, type);
+    } else {
+        console.warn('Function only available in FiveM environment or invalid message');
+    }
+};
+
+window.updateBusinessInfo = (info) => {
+    if (FiveMCallbacks.isFiveM && typeof info === 'object') {
+        FiveMCallbacks.updateBusinessInfo(info);
+    } else {
+        console.warn('Function only available in FiveM environment or invalid info');
+    }
+};

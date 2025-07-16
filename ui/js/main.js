@@ -152,7 +152,8 @@ const BusinessManager = {
             </div>
             <div class="input-group">
                 <label class="input-label">Hourly Wage</label>
-                <input type="number" class="input-field" id="hourlyWage" placeholder="Enter wage" min="10" max="100" step="5">
+                <input type="text" class="input-field" id="hourlyWage" placeholder="Auto-assigned by grade" readonly style="opacity: 0.6; cursor: not-allowed;">
+                <p style="color: var(--text-muted); font-size: 0.75rem; margin-top: 0.25rem;">Wage is automatically set based on grade from QBCore shared</p>
             </div>
         `;
         this.showModal('Hire Employee', body, 'Hire');
@@ -235,8 +236,10 @@ const BusinessManager = {
     
     handleDeposit() {
         const amount = parseInt($('#depositAmount').val());
-        if (!amount || amount <= 0) {
-            this.showToast('Please enter a valid amount', 'error');
+        
+        // Validaciones de seguridad
+        if (!amount || amount <= 0 || amount > 1000000 || !Number.isInteger(amount)) {
+            this.showToast('Please enter a valid amount (1-1,000,000)', 'error');
             return;
         }
         
@@ -248,8 +251,10 @@ const BusinessManager = {
     
     handleWithdraw() {
         const amount = parseInt($('#withdrawAmount').val());
-        if (!amount || amount <= 0) {
-            this.showToast('Please enter a valid amount', 'error');
+        
+        // Validaciones de seguridad
+        if (!amount || amount <= 0 || amount > 1000000 || !Number.isInteger(amount)) {
+            this.showToast('Please enter a valid amount (1-1,000,000)', 'error');
             return;
         }
         
@@ -268,15 +273,20 @@ const BusinessManager = {
     handleHire() {
         const playerId = parseInt($('#playerId').val());
         const grade = parseInt($('#gradeLevel').val());
-        const wage = parseInt($('#hourlyWage').val());
         
-        if (!playerId || !wage) {
-            this.showToast('Please fill all fields', 'error');
+        // Validaciones de seguridad
+        if (!playerId || !Number.isInteger(playerId) || playerId <= 0 || playerId > 9999) {
+            this.showToast('Please enter a valid player ID (1-9999)', 'error');
             return;
         }
         
-        // Simular contratación
-        this.showToast(`Successfully hired player ${playerId}`, 'success');
+        if (grade < 0 || grade > 4 || !Number.isInteger(grade)) {
+            this.showToast('Invalid grade level (0-4)', 'error');
+            return;
+        }
+        
+        // Simular contratación (wage será asignado automáticamente por el servidor)
+        this.showToast(`Successfully hired player ${playerId} at grade ${grade}`, 'success');
         this.hideModal();
     },
     
@@ -355,11 +365,16 @@ const BusinessManager = {
     }
 };
 
-// Función global para testing
+// Función global para testing (solo en modo desarrollo)
 window.togglePanel = function() {
-    if (BusinessManager.isOpen) {
-        BusinessManager.hidePanel();
+    // Solo permitir en modo desarrollo (navegador)
+    if (typeof GetParentResourceName === 'undefined') {
+        if (BusinessManager.isOpen) {
+            BusinessManager.hidePanel();
+        } else {
+            BusinessManager.showPanel();
+        }
     } else {
-        BusinessManager.showPanel();
+        console.warn('Testing function not available in FiveM environment');
     }
 };
