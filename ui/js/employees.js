@@ -158,8 +158,10 @@ const EmployeeManager = {
                 
                 <div class="input-group">
                     <label class="input-label">Hourly Wage</label>
-                    <input type="number" class="input-field" id="editWage" 
-                           value="${employee.wage}" min="10" max="100" step="5">
+                    <input type="text" class="input-field" id="editWage" 
+                           value="$${employee.wage}/hour" readonly 
+                           style="opacity: 0.6; cursor: not-allowed;">
+                    <p style="color: var(--text-muted); font-size: 0.75rem; margin-top: 0.25rem;">Wage is automatically set based on grade from QBCore shared</p>
                 </div>
                 
                 <div style="

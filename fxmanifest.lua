@@ -3,7 +3,7 @@ game 'gta5'
 lua54 'yes'
 
 name 'advance-manager'
-author 'Advanced Scripts'
+author 'JericoFX'
 description 'Advanced Business Management System for FiveM'
 version '1.0.0'
 
