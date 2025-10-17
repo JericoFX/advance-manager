@@ -75,7 +75,7 @@ RegisterNUICallback('advance-manager:hireEmployee', function(data, cb)
                 return
             end
 
-            if not grade then
+            if grade == nil then
                 cb(false, 'Invalid grade')
                 return
             end
@@ -157,7 +157,12 @@ RegisterNUICallback('advance-manager:updateEmployeeGrade', function(data, cb)
                 return
             end
 
-            if not newGrade or newGrade < 0 then
+            if newGrade == nil then
+                cb(false, 'Invalid grade level')
+                return
+            end
+
+            if newGrade < 0 then
                 cb(false, 'Invalid grade level')
                 return
             end
