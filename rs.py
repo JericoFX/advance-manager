@@ -726,6 +726,27 @@ class TextureManagerGUI:
         )
         self.preview_label.grid(row=0, column=0, sticky="nsew")
         self.preview_image = None
+        self.preview_source_image = None
+
+        channel_frame = tk.Frame(preview_frame)
+        channel_frame.grid(row=1, column=0, sticky="ew", padx=4, pady=(6, 2))
+        for column in range(4):
+            channel_frame.columnconfigure(column, weight=1)
+
+        self.channel_vars = {}
+        self.channel_buttons = {}
+        for idx, channel in enumerate("RGBA"):
+            var = tk.IntVar(value=1)
+            btn = tk.Checkbutton(
+                channel_frame,
+                text=channel,
+                variable=var,
+                command=self._update_channel_preview,
+            )
+            btn.grid(row=0, column=idx, padx=2)
+            self.channel_vars[channel] = var
+            self.channel_buttons[channel] = btn
+        self._set_channel_controls_state("disabled")
 
         button_frame = tk.Frame(self.root)
         button_frame.grid(row=1, column=0, columnspan=2, sticky="ew", padx=10, pady=8)
@@ -772,6 +793,43 @@ class TextureManagerGUI:
             self.preview_label.configure(image="", text=message)
             self.preview_label.image = None
         self.preview_image = None
+        self.preview_source_image = None
+        self._set_channel_controls_state("disabled")
+
+    def _set_channel_controls_state(self, state: str) -> None:
+        for button in self.channel_buttons.values():
+            button.configure(state=state)
+        if state == "disabled":
+            for var in self.channel_vars.values():
+                var.set(1)
+
+    def _update_channel_preview(self) -> None:
+        if self.preview_source_image is None or not PIL_IMAGETK_AVAILABLE:
+            return
+
+        rgba = self.preview_source_image.split()
+        if len(rgba) != 4:
+            # Defensive: ensure we always have 4 channels to merge.
+            self.preview_label.configure(image="", text="Unsupported image mode")
+            self.preview_label.image = None
+            self.preview_image = None
+            return
+
+        r, g, b, a = rgba
+        if not self.channel_vars["R"].get():
+            r = Image.new("L", self.preview_source_image.size, 0)
+        if not self.channel_vars["G"].get():
+            g = Image.new("L", self.preview_source_image.size, 0)
+        if not self.channel_vars["B"].get():
+            b = Image.new("L", self.preview_source_image.size, 0)
+        if not self.channel_vars["A"].get():
+            a = Image.new("L", self.preview_source_image.size, 255)
+
+        composed = Image.merge("RGBA", (r, g, b, a))
+        photo = ImageTk.PhotoImage(composed)
+        self.preview_label.configure(image=photo, text="")
+        self.preview_label.image = photo
+        self.preview_image = photo
 
     def _on_entry_selected(self, _event: object) -> None:
         if self.archive_bytes is None or not self.entries:
@@ -829,11 +887,14 @@ class TextureManagerGUI:
             )
             return
 
+        self.preview_source_image = image
+        self._set_channel_controls_state("normal")
         self.preview_label.configure(image=photo, text="")
         self.preview_label.image = photo
         self.preview_image = photo
         format_display = format_hint or detected_format or "unknown"
         self._set_status(f"Previewing {entry['relative_path']} ({format_display})")
+        self._update_channel_preview()
 
     # ------------------------------------------------------------- callbacks --
     def open_archive(self) -> None:
