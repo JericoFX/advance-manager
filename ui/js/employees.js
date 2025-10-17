@@ -37,6 +37,9 @@ const EmployeeManager = {
     createEmployeeCard(employee) {
         const gradeName = BusinessAPI.getGradeName(employee.grade);
         
+        const encodedCitizenId = encodeURIComponent(employee.citizenid);
+        const encodedName = encodeURIComponent(employee.name);
+
         return `
             <div class="employee-card" style="
                 background: rgba(51, 65, 85, 0.3);
@@ -71,15 +74,24 @@ const EmployeeManager = {
                         gap: 0.5rem;
                         flex-shrink: 0;
                     ">
-                        <button class="btn btn-info" 
+                        <button class="btn btn-info"
                                 style="padding: 0.5rem; font-size: 0.75rem; min-width: auto;"
-                                onclick="EmployeeManager.showEditModal(${employee.id})"
+                                data-employee-id="${employee.id}"
+                                data-citizenid="${encodedCitizenId}"
+                                data-grade="${employee.grade}"
+                                data-wage="${employee.wage}"
+                                data-name="${encodedName}"
+                                onclick="EmployeeManager.showEditModal(this)"
                                 title="Edit Employee">
                             <i class="fas fa-edit"></i>
                         </button>
-                        <button class="btn btn-danger" 
+                        <button class="btn btn-danger"
                                 style="padding: 0.5rem; font-size: 0.75rem; min-width: auto;"
-                                onclick="EmployeeManager.confirmFire(${employee.id}, '${employee.name}')"
+                                data-employee-id="${employee.id}"
+                                data-citizenid="${encodedCitizenId}"
+                                data-wage="${employee.wage}"
+                                data-name="${encodedName}"
+                                onclick="EmployeeManager.confirmFire(this)"
                                 title="Fire Employee">
                             <i class="fas fa-trash"></i>
                         </button>
@@ -126,44 +138,75 @@ const EmployeeManager = {
     },
     
     // Mostrar modal de edición
-    async showEditModal(employeeId) {
-        const employee = BusinessAPI.currentBusiness.employees.find(emp => emp.id === employeeId);
-        
+    async showEditModal(triggerElement) {
+        const element = triggerElement instanceof HTMLElement ? triggerElement : null;
+        const dataset = element ? element.dataset : {};
+        const citizenId = dataset.citizenid ? decodeURIComponent(dataset.citizenid) : null;
+        const employeeId = dataset.employeeId ? parseInt(dataset.employeeId, 10) : null;
+
+        let employeesList;
+
+        try {
+            employeesList = await BusinessAPI.getEmployees();
+        } catch (error) {
+            BusinessManager.showToast('Failed to load employees', 'error');
+            return;
+        }
+
+        if (!Array.isArray(employeesList)) {
+            BusinessManager.showToast('Invalid employees data', 'error');
+            return;
+        }
+
+        let employee = null;
+
+        if (citizenId) {
+            employee = employeesList.find(emp => emp.citizenid === citizenId);
+        }
+
+        if (!employee && employeeId) {
+            employee = employeesList.find(emp => emp.id === employeeId);
+        }
+
         if (!employee) {
             BusinessManager.showToast('Employee not found', 'error');
             return;
         }
+
+        const gradeFromDataset = dataset.grade ? parseInt(dataset.grade, 10) : employee.grade;
+        const wageFromDataset = dataset.wage ? parseInt(dataset.wage, 10) : employee.wage;
         
         const grades = BusinessAPI.getGrades();
         let gradeOptions = '';
         
         grades.forEach(grade => {
-            gradeOptions += `<option value="${grade.value}" ${grade.value === employee.grade ? 'selected' : ''}>${grade.label}</option>`;
+            gradeOptions += `<option value="${grade.value}" data-wage="${grade.wage ?? ''}" ${grade.value === gradeFromDataset ? 'selected' : ''}>${grade.label}</option>`;
         });
-        
+
         const body = `
             <div class="employee-edit-form">
                 <div class="input-group">
                     <label class="input-label">Employee Name</label>
-                    <input type="text" class="input-field" value="${employee.name}" disabled 
+                    <input type="text" class="input-field" value="${employee.name}" disabled
                            style="opacity: 0.6; cursor: not-allowed;">
                 </div>
-                
+
                 <div class="input-group">
                     <label class="input-label">Grade Level</label>
                     <select class="input-field" id="editGrade">
                         ${gradeOptions}
                     </select>
                 </div>
-                
+
                 <div class="input-group">
                     <label class="input-label">Hourly Wage</label>
-                    <input type="text" class="input-field" id="editWage" 
-                           value="$${employee.wage}/hour" readonly 
+                    <input type="number" class="input-field" id="editWage"
+                           value="${wageFromDataset}"
+                           readonly data-wage="${wageFromDataset}"
                            style="opacity: 0.6; cursor: not-allowed;">
                     <p style="color: var(--text-muted); font-size: 0.75rem; margin-top: 0.25rem;">Wage is automatically set based on grade from QBCore shared</p>
                 </div>
-                
+
                 <div style="
                     background: rgba(37, 99, 235, 0.1);
                     border: 1px solid rgba(37, 99, 235, 0.3);
@@ -188,14 +231,34 @@ const EmployeeManager = {
                 </div>
             </div>
         `;
-        
+
         BusinessManager.showModal('Edit Employee', body, 'Save Changes');
         BusinessManager.currentAction = 'editEmployee';
-        BusinessManager.editingEmployeeId = employeeId;
+        BusinessManager.editingEmployeeId = citizenId || employeeId;
+
+        const confirmButton = $('#modalConfirm');
+        confirmButton.data('citizenid', employee.citizenid);
+        confirmButton.data('wage', wageFromDataset);
+
+        setTimeout(() => {
+            $('#editGrade').on('change', function() {
+                const selectedGrade = parseInt($(this).val(), 10);
+                const newWage = BusinessManager.getWageForGrade(selectedGrade);
+                if (Number.isFinite(newWage)) {
+                    $('#editWage').val(newWage).data('wage', newWage);
+                    confirmButton.data('wage', newWage);
+                }
+            });
+        }, 0);
     },
-    
+
     // Confirmar despido
-    confirmFire(employeeId, employeeName) {
+    confirmFire(triggerElement) {
+        const element = triggerElement instanceof HTMLElement ? triggerElement : null;
+        const dataset = element ? element.dataset : {};
+        const citizenId = dataset.citizenid ? decodeURIComponent(dataset.citizenid) : null;
+        const employeeName = dataset.name ? decodeURIComponent(dataset.name) : 'this employee';
+
         const body = `
             <div style="text-align: center; padding: 1rem;">
                 <i class="fas fa-exclamation-triangle" style="
@@ -217,40 +280,54 @@ const EmployeeManager = {
                 ">This action cannot be undone.</p>
             </div>
         `;
-        
+
         BusinessManager.showModal('Confirm Action', body, 'Fire Employee');
         BusinessManager.currentAction = 'confirmFire';
-        BusinessManager.firingEmployeeId = employeeId;
-        
+        BusinessManager.firingEmployeeId = citizenId;
+
         // Cambiar color del botón de confirmación
         $('#modalConfirm').removeClass('btn-primary').addClass('btn-danger');
+        $('#modalConfirm').data('citizenid', citizenId);
+        $('#modalConfirm').data('wage', dataset.wage ? parseInt(dataset.wage, 10) : null);
     },
-    
+
     // Manejar edición de empleado
     async handleEditEmployee() {
-        const employeeId = BusinessManager.editingEmployeeId;
+        const confirmButton = $('#modalConfirm');
+        const citizenId = confirmButton.data('citizenid');
         const newGrade = parseInt($('#editGrade').val());
         const newWage = parseInt($('#editWage').val());
-        
+
         if (!newWage || newWage < 10 || newWage > 100) {
             BusinessManager.showToast('Invalid wage amount (10-100)', 'error');
             return;
         }
-        
+
+        if (!citizenId) {
+            BusinessManager.showToast('Missing employee data', 'error');
+            return;
+        }
+
         try {
             BusinessManager.showLoading('Updating employee...');
-            
+
             // Actualizar grado si cambió
-            const employee = BusinessAPI.currentBusiness.employees.find(emp => emp.id === employeeId);
-            if (employee.grade !== newGrade) {
-                await BusinessAPI.updateEmployeeGrade(employeeId, newGrade);
+            const employees = await BusinessAPI.getEmployees();
+            const employee = employees.find(emp => emp.citizenid === citizenId);
+
+            if (!employee) {
+                throw { error: 'Employee not found' };
             }
-            
+
+            if (employee.grade !== newGrade) {
+                await BusinessAPI.updateEmployeeGrade(citizenId, newGrade, newWage);
+            }
+
             // Actualizar salario si cambió
             if (employee.wage !== newWage) {
-                await BusinessAPI.updateEmployeeWage(employeeId, newWage);
+                await BusinessAPI.updateEmployeeWage(citizenId, newWage);
             }
-            
+
             BusinessManager.hideLoading();
             BusinessManager.showToast('Employee updated successfully', 'success');
             BusinessManager.hideModal();
@@ -262,16 +339,22 @@ const EmployeeManager = {
             BusinessManager.showToast(error.error || 'Failed to update employee', 'error');
         }
     },
-    
+
     // Manejar confirmación de despido
     async handleConfirmFire() {
-        const employeeId = BusinessManager.firingEmployeeId;
-        
+        const confirmButton = $('#modalConfirm');
+        const citizenId = confirmButton.data('citizenid') || BusinessManager.firingEmployeeId;
+
+        if (!citizenId) {
+            BusinessManager.showToast('Missing employee data', 'error');
+            return;
+        }
+
         try {
             BusinessManager.showLoading('Firing employee...');
-            const result = await BusinessAPI.fireEmployee(employeeId);
+            const result = await BusinessAPI.fireEmployee(citizenId);
             BusinessManager.hideLoading();
-            
+
             BusinessManager.showToast(result.message, 'success');
             BusinessManager.updateEmployeeCount();
             BusinessManager.hideModal();
@@ -323,9 +406,10 @@ if (typeof BusinessManager !== 'undefined') {
             this.currentAction = null;
             this.editingEmployeeId = null;
             this.firingEmployeeId = null;
-            
+
             // Restaurar botón de confirmación
             $('#modalConfirm').removeClass('btn-danger').addClass('btn-primary');
+            $('#modalConfirm').removeData('citizenid').removeData('wage');
         }
     });
 }

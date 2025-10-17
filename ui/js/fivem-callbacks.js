@@ -71,11 +71,12 @@ const FiveMCallbacks = {
             },
             
             // Contratar empleado
-            async hireEmployee(playerId, grade) {
+            async hireEmployee(playerId, grade, wage) {
                 return new Promise((resolve, reject) => {
-                    this.performCallback('advance-manager:hireEmployee', { 
-                        playerId, 
-                        grade
+                    this.performCallback('advance-manager:hireEmployee', {
+                        playerId,
+                        grade,
+                        wage
                     }, (success, message) => {
                         if (success) {
                             resolve({ success: true, message: message });
@@ -87,10 +88,11 @@ const FiveMCallbacks = {
             },
             
             // Despedir empleado
-            async fireEmployee(employeeId) {
+            async fireEmployee(citizenId, wage) {
                 return new Promise((resolve, reject) => {
-                    this.performCallback('advance-manager:fireEmployee', { 
-                        employeeId 
+                    this.performCallback('advance-manager:fireEmployee', {
+                        citizenid: citizenId,
+                        wage
                     }, (success, message) => {
                         if (success) {
                             resolve({ success: true, message: message });
@@ -115,11 +117,12 @@ const FiveMCallbacks = {
             },
             
             // Actualizar salario de empleado
-            async updateEmployeeWage(employeeId, newWage) {
+            async updateEmployeeWage(citizenId, newWage) {
                 return new Promise((resolve, reject) => {
-                    this.performCallback('advance-manager:updateEmployeeWage', { 
-                        employeeId, 
-                        newWage 
+                    this.performCallback('advance-manager:updateEmployeeWage', {
+                        citizenid: citizenId,
+                        newWage,
+                        wage: newWage
                     }, (success, message) => {
                         if (success) {
                             resolve({ success: true, message: message });
@@ -131,11 +134,12 @@ const FiveMCallbacks = {
             },
             
             // Actualizar grado de empleado
-            async updateEmployeeGrade(employeeId, newGrade) {
+            async updateEmployeeGrade(citizenId, newGrade, wage) {
                 return new Promise((resolve, reject) => {
-                    this.performCallback('advance-manager:updateEmployeeGrade', { 
-                        employeeId, 
-                        newGrade 
+                    this.performCallback('advance-manager:updateEmployeeGrade', {
+                        citizenid: citizenId,
+                        newGrade,
+                        wage
                     }, (success, message) => {
                         if (success) {
                             resolve({ success: true, message: message });
@@ -282,20 +286,26 @@ const FiveMCallbacks = {
             return false;
         }
         
-        if (data.playerId && (!Number.isInteger(data.playerId) || data.playerId <= 0)) {
+        if (data.playerId !== undefined && (!Number.isInteger(data.playerId) || data.playerId <= 0)) {
             return false;
         }
-        
+
         if (data.grade !== undefined && (!Number.isInteger(data.grade) || data.grade < 0 || data.grade > 4)) {
             return false;
         }
-        
-        // wage ya no es validado aquí, se asigna automáticamente desde QBCore shared
-        
+
+        if (data.wage !== undefined && (!Number.isInteger(data.wage) || data.wage < 0)) {
+            return false;
+        }
+
         if (data.employeeId && (!Number.isInteger(data.employeeId) || data.employeeId <= 0)) {
             return false;
         }
-        
+
+        if (data.citizenid !== undefined && typeof data.citizenid !== 'string') {
+            return false;
+        }
+
         return true;
     },
     
