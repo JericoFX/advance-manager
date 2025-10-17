@@ -114,10 +114,10 @@ def _unwrap_asura_container(
 ) -> Tuple[bytes | mmap.mmap, Dict[str, object]]:
     """Return the raw Asura archive payload and compression metadata."""
 
-    if data.startswith(ASURA_MAGIC):
+    if data[: len(ASURA_MAGIC)] == ASURA_MAGIC:
         return data, {"kind": "raw"}
 
-    if data.startswith(ASURA_ZLB_MAGIC):
+    if data[: len(ASURA_ZLB_MAGIC)] == ASURA_ZLB_MAGIC:
         if len(data) < 20:
             raise RSFLParsingError("truncated AsuraZlb header")
 
@@ -139,7 +139,7 @@ def _unwrap_asura_container(
             "expected_size": expected_size,
         }
 
-    if data.startswith(ASURA_ZBB_MAGIC):
+    if data[: len(ASURA_ZBB_MAGIC)] == ASURA_ZBB_MAGIC:
         if len(data) < 16:
             raise RSFLParsingError("truncated AsuraZbb header")
 
