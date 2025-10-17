@@ -4,9 +4,13 @@ const EmployeeManager = {
     async showEmployeesList() {
         try {
             const employees = await BusinessAPI.getEmployees();
-            
+
+            if (typeof BusinessManager !== 'undefined' && typeof BusinessManager.setSyncedEmployees === 'function') {
+                BusinessManager.setSyncedEmployees(employees);
+            }
+
             let body = '<div class="employees-list">';
-            
+
             if (employees.length === 0) {
                 body += `
                     <div style="
@@ -331,8 +335,13 @@ const EmployeeManager = {
             BusinessManager.hideLoading();
             BusinessManager.showToast('Employee updated successfully', 'success');
             BusinessManager.hideModal();
-            
-            // Refrescar lista
+
+            // Refrescar lista y sincronizar empleados
+            if (typeof BusinessManager.syncEmployeesFromServer === 'function') {
+                const refreshedEmployees = await BusinessManager.syncEmployeesFromServer();
+                BusinessManager.updateEmployeeCount(refreshedEmployees?.length);
+            }
+
             this.showEmployeesList();
         } catch (error) {
             BusinessManager.hideLoading();
@@ -356,9 +365,16 @@ const EmployeeManager = {
             BusinessManager.hideLoading();
 
             BusinessManager.showToast(result.message, 'success');
-            BusinessManager.updateEmployeeCount();
             BusinessManager.hideModal();
-            
+
+            let syncedEmployees = [];
+
+            if (typeof BusinessManager.syncEmployeesFromServer === 'function') {
+                syncedEmployees = await BusinessManager.syncEmployeesFromServer();
+            }
+
+            BusinessManager.updateEmployeeCount(syncedEmployees?.length);
+
             // Refrescar lista
             this.showEmployeesList();
         } catch (error) {
