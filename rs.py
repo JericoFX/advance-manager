@@ -223,21 +223,20 @@ def _read_padded_string(data: bytes, offset: int) -> Tuple[str, int]:
     return text, cursor - offset
 
 
-def _scan_for_rsfl(data: bytes) -> Tuple[int, int, int, int, int]:
-    """Locate the RSFL chunk and return its metadata.
-
-    Returns a tuple ``(chunk_offset, chunk_size, type1, type2, entry_count)``.
-    ``chunk_size`` already includes the 16 byte chunk header.
-    """
+def _scan_for_rsfl(data: bytes) -> Dict[str, object]:
+    """Locate RS managed chunks and describe their layout."""
 
     if not data.startswith(ASURA_MAGIC):
         raise RSFLParsingError("file is not an Asura archive")
 
     cursor = len(ASURA_MAGIC)
+    rscf_chunks: List[Dict[str, object]] = []
+
     while cursor + CHUNK_HEADER.size <= len(data):
         magic, size, type1, type2 = CHUNK_HEADER.unpack_from(data, cursor)
         if size == 0:
             raise RSFLParsingError("encountered zero-sized chunk while scanning")
+
         if magic == b"LFSR":
             header_start = cursor
             header_end = cursor + 16
@@ -246,10 +245,49 @@ def _scan_for_rsfl(data: bytes) -> Tuple[int, int, int, int, int]:
             )
             if rsfl_magic != 0x5246534C:  # 'LFSR'
                 raise RSFLParsingError("corrupted RSFL inner header")
-            return header_start, size, rsfl_type1, rsfl_type2, count
+            return {
+                "layout": "rsfl",
+                "chunks": [
+                    {
+                        "offset": header_start,
+                        "chunk_size": size,
+                        "type1": type1,
+                        "type2": type2,
+                        "rsfl": {
+                            "inner_size": rsfl_size,
+                            "type1": rsfl_type1,
+                            "type2": rsfl_type2,
+                            "entry_count": count,
+                        },
+                    }
+                ],
+            }
+
+        if magic == b"RSCF":
+            header_offset = cursor + 16
+            if header_offset + 12 > len(data):
+                raise RSFLParsingError("truncated RSCF header")
+            version, data_offset, data_span = struct.unpack_from("<III", data, header_offset)
+            rscf_chunks.append(
+                {
+                    "offset": cursor,
+                    "chunk_size": size,
+                    "type1": type1,
+                    "type2": type2,
+                    "rscf": {
+                        "version": version,
+                        "data_offset": data_offset,
+                        "data_span": data_span,
+                    },
+                }
+            )
+
         cursor += size
 
-    raise RSFLParsingError("unable to locate RSFL chunk")
+    if rscf_chunks:
+        return {"layout": "rscf", "chunks": rscf_chunks}
+
+    raise RSFLParsingError("unable to locate RS controlled chunks")
 
 
 def _parse_rsfl_entries(
@@ -276,6 +314,55 @@ def _parse_rsfl_entries(
             }
         )
     return entries, cursor
+
+
+def _parse_rscf_entries(data: bytes, chunk_info: Dict[str, object]) -> List[Dict[str, object]]:
+    """Parse a single RSCF chunk and return its entry description."""
+
+    chunk_offset = int(chunk_info["offset"])
+    chunk_size = int(chunk_info["chunk_size"])
+    header = dict(chunk_info.get("rscf") or {})
+
+    header_offset = chunk_offset + 16
+    if header_offset + 12 > len(data):
+        raise RSFLParsingError("truncated RSCF chunk header")
+
+    version = int(header.get("version", 0))
+    data_offset = int(header.get("data_offset", 0))
+    data_span = int(header.get("data_span", 0))
+
+    cursor = header_offset + 12
+    name, consumed = _read_padded_string(data, cursor)
+    cursor += consumed + data_offset
+
+    payload_offset = cursor
+    payload_end = payload_offset + data_span
+    chunk_end = chunk_offset + chunk_size
+
+    if payload_end > chunk_end or payload_end > len(data):
+        raise RSFLParsingError("RSCF payload exceeds chunk bounds")
+
+    relative_name = name.lstrip("/\\")
+
+    entry = {
+        "layout": "rscf",
+        "name": name,
+        "relative_path": str(relative_name),
+        "offset": payload_offset,
+        "size": data_span,
+        "raw_offset": None,
+        "table_offset": None,
+        "offset_anchor": payload_offset,
+        "anchor_kind": "absolute",
+        "chunk_offset": chunk_offset,
+        "chunk_size": chunk_size,
+        "header_offset": header_offset,
+        "header_version": version,
+        "header_data_offset": data_offset,
+        "header_data_span": data_span,
+    }
+
+    return [entry]
 
 
 def _resolve_entry_offset(raw_offset: int, size: int, data_length: int, rsfl_offset: int, rsfl_chunk_size: int) -> int:
@@ -320,6 +407,7 @@ def _normalise_entries(
                     if offset_anchor == rsfl_offset
                     else "absolute"
                 ),
+                "layout": "rsfl",
             }
         )
     return normalised
@@ -328,22 +416,59 @@ def _normalise_entries(
 def load_archive(
     archive_path: Path,
 ) -> Tuple[bytes, Dict[str, object], List[Dict[str, object]], Dict[str, object]]:
-    """Read an Asura archive and return its bytes, RSFL metadata and entries."""
+    """Read an Asura archive and return its bytes, metadata and entries."""
 
     original_bytes = archive_path.read_bytes()
     data, wrapper = _unwrap_asura_container(original_bytes)
-    rsfl_offset, rsfl_chunk_size, rsfl_type1, rsfl_type2, entry_count = _scan_for_rsfl(data)
-    entries_raw, table_end = _parse_rsfl_entries(data, rsfl_offset, rsfl_chunk_size, entry_count)
-    entries = _normalise_entries(entries_raw, data, rsfl_offset, rsfl_chunk_size)
+    layout_info = _scan_for_rsfl(data)
 
-    rsfl_info = {
-        "offset": rsfl_offset,
-        "chunk_size": rsfl_chunk_size,
-        "type1": rsfl_type1,
-        "type2": rsfl_type2,
-        "table_end": table_end,
-    }
-    return data, rsfl_info, entries, wrapper
+    layout = layout_info.get("layout")
+    entries: List[Dict[str, object]] = []
+
+    if layout == "rsfl":
+        chunk = layout_info["chunks"][0]
+        rsfl_details = chunk.get("rsfl") or {}
+        rsfl_offset = int(chunk["offset"])
+        rsfl_chunk_size = int(chunk["chunk_size"])
+        rsfl_type1 = int(rsfl_details.get("type1", 0))
+        rsfl_type2 = int(rsfl_details.get("type2", 0))
+        entry_count = int(rsfl_details.get("entry_count", 0))
+
+        entries_raw, table_end = _parse_rsfl_entries(
+            data, rsfl_offset, rsfl_chunk_size, entry_count
+        )
+        entries = _normalise_entries(entries_raw, data, rsfl_offset, rsfl_chunk_size)
+
+        chunk_info: Dict[str, object] = {
+            "layout": "rsfl",
+            "offset": rsfl_offset,
+            "chunk_size": rsfl_chunk_size,
+            "type1": rsfl_type1,
+            "type2": rsfl_type2,
+            "table_end": table_end,
+            "entry_count": entry_count,
+        }
+    elif layout == "rscf":
+        chunk_info = {
+            "layout": "rscf",
+            "chunks": [],
+        }
+        for chunk in layout_info.get("chunks", []):
+            chunk_entries = _parse_rscf_entries(data, chunk)
+            entries.extend(chunk_entries)
+            chunk_info["chunks"].append(
+                {
+                    "offset": int(chunk["offset"]),
+                    "chunk_size": int(chunk["chunk_size"]),
+                    "type1": int(chunk["type1"]),
+                    "type2": int(chunk["type2"]),
+                    "header": dict(chunk.get("rscf") or {}),
+                }
+            )
+    else:  # pragma: no cover - defensive, should not happen
+        raise RSFLParsingError("unsupported resource layout")
+
+    return data, chunk_info, entries, wrapper
 
 
 def is_image_entry(entry_name: str) -> bool:
@@ -408,6 +533,18 @@ def _apply_replacements(
         new_size = len(payload)
         start = entry["offset"]
         end = start + entry["size"]
+
+        layout = entry.get("layout", "rsfl")
+
+        if layout == "rscf":
+            if new_size != entry["size"]:
+                raise RSFLParsingError(
+                    f"replacement for {rel_path} must preserve the original size in RSCF archives"
+                )
+            updated[start:end] = payload
+            entry["offset"] = start
+            entry["size"] = new_size
+            continue
 
         if new_size == entry["size"]:
             new_offset = start
