@@ -35,6 +35,7 @@ from __future__ import annotations
 import argparse
 import io
 import json
+import mmap
 import os
 import shutil
 import struct
@@ -81,6 +82,9 @@ CHUNK_HEADER = struct.Struct("<4sIII")
 RSFL_ENTRY_STRUCT = struct.Struct("<III")
 RSFL_CHUNK_HEADER = struct.Struct("<5I")  # magic, size_with_header, type, type2, count
 
+# Files above this size will be memory-mapped instead of fully loaded into RAM.
+MEMORY_MAP_THRESHOLD = int(os.environ.get("RS_MEMORY_MAP_THRESHOLD", 256 * 1024 * 1024))
+
 IMAGE_EXTENSIONS = {
     ".bmp",
     ".dds",
@@ -105,13 +109,15 @@ def normalize_relative_path(name: str) -> str:
     return normalised.lstrip("/")
 
 
-def _unwrap_asura_container(data: bytes) -> Tuple[bytes, Dict[str, object]]:
+def _unwrap_asura_container(
+    data: bytes | mmap.mmap,
+) -> Tuple[bytes | mmap.mmap, Dict[str, object]]:
     """Return the raw Asura archive payload and compression metadata."""
 
-    if data.startswith(ASURA_MAGIC):
+    if data[: len(ASURA_MAGIC)] == ASURA_MAGIC:
         return data, {"kind": "raw"}
 
-    if data.startswith(ASURA_ZLB_MAGIC):
+    if data[: len(ASURA_ZLB_MAGIC)] == ASURA_ZLB_MAGIC:
         if len(data) < 20:
             raise RSFLParsingError("truncated AsuraZlb header")
 
@@ -133,7 +139,7 @@ def _unwrap_asura_container(data: bytes) -> Tuple[bytes, Dict[str, object]]:
             "expected_size": expected_size,
         }
 
-    if data.startswith(ASURA_ZBB_MAGIC):
+    if data[: len(ASURA_ZBB_MAGIC)] == ASURA_ZBB_MAGIC:
         if len(data) < 16:
             raise RSFLParsingError("truncated AsuraZbb header")
 
@@ -464,13 +470,44 @@ def _normalise_entries(
     return normalised
 
 
+def _read_archive_bytes(path: Path) -> bytes | mmap.mmap:
+    """Return the bytes for ``path`` using a memory map when appropriate."""
+
+    try:
+        size = path.stat().st_size
+    except OSError as exc:  # pragma: no cover - filesystem dependent
+        raise RSFLParsingError(f"unable to stat archive: {exc}") from exc
+
+    if size >= max(0, MEMORY_MAP_THRESHOLD):
+        fd = os.open(path, os.O_RDONLY)
+        try:
+            return mmap.mmap(fd, length=0, access=mmap.ACCESS_READ)
+        finally:
+            os.close(fd)
+
+    return path.read_bytes()
+
+
+def _release_archive_buffer(buffer: object) -> None:
+    """Release buffers that expose a ``close`` method (e.g. memory maps)."""
+
+    close = getattr(buffer, "close", None)
+    if callable(close):
+        try:
+            close()
+        except Exception:  # pragma: no cover - best-effort cleanup
+            pass
+
+
 def load_archive(
     archive_path: Path,
-) -> Tuple[bytes, Dict[str, object], List[Dict[str, object]], Dict[str, object]]:
+) -> Tuple[bytes | mmap.mmap, Dict[str, object], List[Dict[str, object]], Dict[str, object]]:
     """Read an Asura archive and return its bytes, metadata and entries."""
 
-    original_bytes = archive_path.read_bytes()
+    original_bytes = _read_archive_bytes(archive_path)
     data, wrapper = _unwrap_asura_container(original_bytes)
+    if data is not original_bytes:
+        _release_archive_buffer(original_bytes)
     layout_info = _scan_for_rsfl(data)
 
     layout = layout_info.get("layout")
@@ -537,37 +574,40 @@ def extract_archive(archive_path: Path, output_dir: Path) -> Path:
 
     data, rsfl_info, entries, wrapper = load_archive(archive_path)
 
-    archive_name = archive_path.name
-    output_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        archive_name = archive_path.name
+        output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Dump all files controlled by the RSFL table.
-    extracted_files: List[Dict[str, object]] = []
-    for entry in entries:
-        payload = data[entry["offset"] : entry["offset"] + entry["size"]]
-        relative_path = entry["relative_path"]
-        relative_target = Path(*relative_path.split("/")) if relative_path else Path()
-        target_path = output_dir / relative_target
-        target_path.parent.mkdir(parents=True, exist_ok=True)
-        target_path.write_bytes(payload)
-        extracted_files.append(entry)
+        # Dump all files controlled by the RSFL table.
+        extracted_files: List[Dict[str, object]] = []
+        for entry in entries:
+            payload = data[entry["offset"] : entry["offset"] + entry["size"]]
+            relative_path = entry["relative_path"]
+            relative_target = Path(*relative_path.split("/")) if relative_path else Path()
+            target_path = output_dir / relative_target
+            target_path.parent.mkdir(parents=True, exist_ok=True)
+            target_path.write_bytes(payload)
+            extracted_files.append(entry)
 
-    manifest = {
-        "archive": archive_name,
-        "rsfl": rsfl_info,
-        "wrapper": wrapper,
-        "files": extracted_files,
-    }
+        manifest = {
+            "archive": archive_name,
+            "rsfl": rsfl_info,
+            "wrapper": wrapper,
+            "files": extracted_files,
+        }
 
-    manifest_path = output_dir / "manifest.json"
-    manifest_path.write_text(json.dumps(manifest, indent=2))
+        manifest_path = output_dir / "manifest.json"
+        manifest_path.write_text(json.dumps(manifest, indent=2))
 
-    # Store pristine copy of the archive next to the extraction to simplify repacking.
-    shutil.copy2(archive_path, output_dir / archive_name)
-    return manifest_path
+        # Store pristine copy of the archive next to the extraction to simplify repacking.
+        shutil.copy2(archive_path, output_dir / archive_name)
+        return manifest_path
+    finally:
+        _release_archive_buffer(data)
 
 
 def _apply_replacements(
-    archive_bytes: bytes,
+    archive_bytes: bytes | mmap.mmap,
     entries: List[Dict[str, object]],
     replacements: Dict[str, bytes],
 ) -> Tuple[bytearray, List[Dict[str, object]]]:
@@ -645,33 +685,36 @@ def repack_archive(original_archive: Path, manifest_path: Path, modified_dir: Pa
         raise RSFLParsingError("manifest does not contain any file entries")
 
     archive_bytes, _rsfl_info, entries, wrapper = load_archive(original_archive)
-    manifest_wrapper = manifest.get("wrapper") or {"kind": "raw"}
-    if manifest_wrapper.get("kind") != wrapper.get("kind"):
-        raise RSFLParsingError(
-            "manifest was generated from an archive with a different compression wrapper"
-        )
-    manifest_index = {entry["relative_path"]: entry for entry in files_info}
+    try:
+        manifest_wrapper = manifest.get("wrapper") or {"kind": "raw"}
+        if manifest_wrapper.get("kind") != wrapper.get("kind"):
+            raise RSFLParsingError(
+                "manifest was generated from an archive with a different compression wrapper"
+            )
+        manifest_index = {entry["relative_path"]: entry for entry in files_info}
 
-    replacements: Dict[str, bytes] = {}
-    for entry in entries:
-        rel_path = entry["relative_path"]
-        manifest_entry = manifest_index.get(rel_path)
-        if manifest_entry is None:
-            # Ignore files that were not part of the extraction.
-            continue
-        payload_path = modified_dir / rel_path
-        if not payload_path.exists():
-            continue
-        replacements[rel_path] = payload_path.read_bytes()
+        replacements: Dict[str, bytes] = {}
+        for entry in entries:
+            rel_path = entry["relative_path"]
+            manifest_entry = manifest_index.get(rel_path)
+            if manifest_entry is None:
+                # Ignore files that were not part of the extraction.
+                continue
+            payload_path = modified_dir / rel_path
+            if not payload_path.exists():
+                continue
+            replacements[rel_path] = payload_path.read_bytes()
 
-    if not replacements:
-        raise RSFLParsingError("no modified files found in the provided directory")
+        if not replacements:
+            raise RSFLParsingError("no modified files found in the provided directory")
 
-    updated, _ = _apply_replacements(archive_bytes, entries, replacements)
-    wrapped = _wrap_asura_container(bytes(updated), wrapper)
+        updated, _ = _apply_replacements(archive_bytes, entries, replacements)
+        wrapped = _wrap_asura_container(bytes(updated), wrapper)
 
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_bytes(wrapped)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(wrapped)
+    finally:
+        _release_archive_buffer(archive_bytes)
 
 
 class TextureManagerGUI:
@@ -686,12 +729,13 @@ class TextureManagerGUI:
         self.root.geometry("720x480")
 
         self.archive_path: Path | None = None
-        self.archive_bytes: bytes | None = None
+        self.archive_bytes: bytes | mmap.mmap | None = None
         self.entries: List[Dict[str, object]] = []
         self.replacements: Dict[str, bytes] = {}
         self.wrapper_info: Dict[str, object] | None = None
 
         self._build_ui()
+        self.root.protocol("WM_DELETE_WINDOW", self._shutdown)
 
     # ------------------------------------------------------------------ UI --
     def _build_ui(self) -> None:
@@ -874,6 +918,11 @@ class TextureManagerGUI:
         self._set_channel_controls_state("disabled")
         self.last_activated_index = None
 
+    def _shutdown(self) -> None:
+        _release_archive_buffer(self.archive_bytes)
+        self.archive_bytes = None
+        self.root.destroy()
+
     def _remember_last_active(self, event: object) -> None:
         if not hasattr(event, "y"):
             return
@@ -1022,6 +1071,8 @@ class TextureManagerGUI:
         if not filename:
             return
 
+        previous_buffer = self.archive_bytes
+
         try:
             data, _rsfl_info, entries, wrapper = load_archive(Path(filename))
         except Exception as exc:  # pragma: no cover - GUI path
@@ -1035,6 +1086,7 @@ class TextureManagerGUI:
                 "The selected archive does not contain recognised image entries.",
             )
 
+        _release_archive_buffer(previous_buffer)
         self.archive_path = Path(filename)
         self.archive_bytes = data
         self.entries = image_entries
@@ -1137,9 +1189,11 @@ class TextureManagerGUI:
         if not filename:
             return
 
+        previous_buffer = self.archive_bytes
+
         try:
             updated, updated_entries = _apply_replacements(
-                self.archive_bytes, self.entries, self.replacements
+                previous_buffer, self.entries, self.replacements
             )
         except Exception as exc:  # pragma: no cover - GUI path
             messagebox.showerror("Unable to apply replacements", str(exc))
@@ -1150,6 +1204,7 @@ class TextureManagerGUI:
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_bytes(wrapped)
 
+        _release_archive_buffer(previous_buffer)
         self.archive_bytes = bytes(updated)
         self.entries = updated_entries
         self.replacements.clear()

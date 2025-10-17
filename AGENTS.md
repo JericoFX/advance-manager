@@ -6,12 +6,13 @@ This repository contains a single Python utility, `rs.py`, which provides toolin
 
 * Implements both command-line and Tkinter-based GUI interfaces for extracting and repacking `.asr`/`.pc` archives following the RSFL format.
 * Handles reading, decompressing, and rewriting the `Asura`, `AsuraZlb`, and `AsuraZbb` container variants while preserving metadata required for lossless repacks.
+* Automatically memory-maps large archives (configurable via the `RS_MEMORY_MAP_THRESHOLD` environment variable) to avoid loading multi-hundred-megabyte files entirely into RAM.
 * Provides helper routines for texture previewing and exporting, including batch export logic shared between CLI and GUI actions.
 
 ## Command-line workflow (`rs.py extract` / `rs.py repack`)
 
 1. **Extraction**
-   * Reads the complete archive into memory (`Path.read_bytes`) regardless of extension.
+   * Loads the archive bytes directly, memory-mapping files that exceed the configured threshold so large inputs do not need to be copied into RAM.
    * Decompresses the underlying container if necessary, parses RSFL tables, and writes each entry to the chosen output directory.
    * Always writes a `manifest.json` alongside the extracted files that captures offsets, sizes, and metadata necessary to reconstruct the archive.
    * Stores a verbatim copy of the original archive next to the extraction results for convenient repacking.
