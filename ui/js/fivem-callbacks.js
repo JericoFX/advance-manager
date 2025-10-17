@@ -36,7 +36,27 @@ const FiveMCallbacks = {
                 return new Promise((resolve, reject) => {
                     this.performCallback('advance-manager:getPlayerBusiness', {}, (result) => {
                         if (result) {
-                            resolve(result);
+                            const previousBusiness = BusinessAPI.currentBusiness || {};
+                            BusinessAPI.currentBusiness = {
+                                ...previousBusiness,
+                                ...result,
+                                jobName: result.job_name || result.jobName || result.job || result.jobLabel || previousBusiness.jobName
+                            };
+
+                            if (!Array.isArray(BusinessAPI.currentBusiness.employees)) {
+                                BusinessAPI.currentBusiness.employees = [];
+                            }
+
+                            if (typeof BusinessManager !== 'undefined' && typeof BusinessManager.setSyncedEmployees === 'function') {
+                                BusinessManager.setSyncedEmployees(BusinessAPI.currentBusiness.employees);
+                            }
+
+                            if (typeof BusinessManager !== 'undefined' && typeof BusinessManager.updateEmployeeCount === 'function') {
+                                const countFromServer = typeof result.employee_count === 'number' ? result.employee_count : undefined;
+                                BusinessManager.updateEmployeeCount(countFromServer);
+                            }
+
+                            resolve(BusinessAPI.currentBusiness);
                         } else {
                             reject({ error: 'No business found' });
                         }
@@ -71,11 +91,12 @@ const FiveMCallbacks = {
             },
             
             // Contratar empleado
-            async hireEmployee(playerId, grade) {
+            async hireEmployee(playerId, grade, wage) {
                 return new Promise((resolve, reject) => {
-                    this.performCallback('advance-manager:hireEmployee', { 
-                        playerId, 
-                        grade
+                    this.performCallback('advance-manager:hireEmployee', {
+                        playerId,
+                        grade,
+                        wage
                     }, (success, message) => {
                         if (success) {
                             resolve({ success: true, message: message });
@@ -87,10 +108,11 @@ const FiveMCallbacks = {
             },
             
             // Despedir empleado
-            async fireEmployee(employeeId) {
+            async fireEmployee(citizenId, wage) {
                 return new Promise((resolve, reject) => {
-                    this.performCallback('advance-manager:fireEmployee', { 
-                        employeeId 
+                    this.performCallback('advance-manager:fireEmployee', {
+                        citizenid: citizenId,
+                        wage
                     }, (success, message) => {
                         if (success) {
                             resolve({ success: true, message: message });
@@ -106,7 +128,18 @@ const FiveMCallbacks = {
                 return new Promise((resolve, reject) => {
                     this.performCallback('advance-manager:getBusinessEmployees', {}, (employees) => {
                         if (employees) {
-                            resolve(employees);
+                            BusinessAPI.currentBusiness = BusinessAPI.currentBusiness || {};
+                            BusinessAPI.currentBusiness.employees = Array.isArray(employees) ? employees : [];
+
+                            if (typeof BusinessManager !== 'undefined' && typeof BusinessManager.setSyncedEmployees === 'function') {
+                                BusinessManager.setSyncedEmployees(BusinessAPI.currentBusiness.employees);
+                            }
+
+                            if (typeof BusinessManager !== 'undefined' && typeof BusinessManager.updateEmployeeCount === 'function') {
+                                BusinessManager.updateEmployeeCount(BusinessAPI.currentBusiness.employees.length);
+                            }
+
+                            resolve(BusinessAPI.currentBusiness.employees);
                         } else {
                             reject({ error: 'Failed to load employees' });
                         }
@@ -115,11 +148,12 @@ const FiveMCallbacks = {
             },
             
             // Actualizar salario de empleado
-            async updateEmployeeWage(employeeId, newWage) {
+            async updateEmployeeWage(citizenId, newWage) {
                 return new Promise((resolve, reject) => {
-                    this.performCallback('advance-manager:updateEmployeeWage', { 
-                        employeeId, 
-                        newWage 
+                    this.performCallback('advance-manager:updateEmployeeWage', {
+                        citizenid: citizenId,
+                        newWage,
+                        wage: newWage
                     }, (success, message) => {
                         if (success) {
                             resolve({ success: true, message: message });
@@ -131,11 +165,12 @@ const FiveMCallbacks = {
             },
             
             // Actualizar grado de empleado
-            async updateEmployeeGrade(employeeId, newGrade) {
+            async updateEmployeeGrade(citizenId, newGrade, wage) {
                 return new Promise((resolve, reject) => {
-                    this.performCallback('advance-manager:updateEmployeeGrade', { 
-                        employeeId, 
-                        newGrade 
+                    this.performCallback('advance-manager:updateEmployeeGrade', {
+                        citizenid: citizenId,
+                        newGrade,
+                        wage
                     }, (success, message) => {
                         if (success) {
                             resolve({ success: true, message: message });
@@ -282,20 +317,26 @@ const FiveMCallbacks = {
             return false;
         }
         
-        if (data.playerId && (!Number.isInteger(data.playerId) || data.playerId <= 0)) {
+        if (data.playerId !== undefined && (!Number.isInteger(data.playerId) || data.playerId <= 0)) {
             return false;
         }
-        
+
         if (data.grade !== undefined && (!Number.isInteger(data.grade) || data.grade < 0 || data.grade > 4)) {
             return false;
         }
-        
-        // wage ya no es validado aquí, se asigna automáticamente desde QBCore shared
-        
+
+        if (data.wage !== undefined && (!Number.isInteger(data.wage) || data.wage < 0)) {
+            return false;
+        }
+
         if (data.employeeId && (!Number.isInteger(data.employeeId) || data.employeeId <= 0)) {
             return false;
         }
-        
+
+        if (data.citizenid !== undefined && typeof data.citizenid !== 'string') {
+            return false;
+        }
+
         return true;
     },
     

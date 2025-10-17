@@ -1,6 +1,41 @@
 local Employees = {}
 local Business = require 'server.modules.business'
 
+local function normalizeCharinfo(rawCharinfo)
+    local decoded = {}
+
+    if type(rawCharinfo) == 'table' then
+        decoded = rawCharinfo
+    else
+        local ok, parsed = pcall(json.decode, rawCharinfo or '{}')
+        if ok and type(parsed) == 'table' then
+            decoded = parsed
+        end
+    end
+
+    local firstname = decoded.firstname
+    if type(firstname) == 'string' then
+        firstname = firstname:match('^%s*(.-)%s*$')
+    end
+    if type(firstname) ~= 'string' or firstname == '' then
+        firstname = 'Unknown'
+    end
+
+    local lastname = decoded.lastname
+    if type(lastname) == 'string' then
+        lastname = lastname:match('^%s*(.-)%s*$')
+    end
+    if type(lastname) ~= 'string' or lastname == '' then
+        lastname = 'Unknown'
+    end
+
+    decoded.firstname = firstname
+    decoded.lastname = lastname
+    decoded.fullname = firstname .. ' ' .. lastname
+
+    return decoded
+end
+
 -- Función para cargar todos los empleados al caché
 function Employees.LoadAllToCache()
     local result = MySQL.query.await([[
@@ -19,15 +54,17 @@ function Employees.LoadAllToCache()
                 cache[businessId] = {}
             end
             
-            local charinfo = json.decode(employee.charinfo or '{}')
+            local charinfo = normalizeCharinfo(employee.charinfo)
             table.insert(cache[businessId], {
                 id = employee.id,
                 citizenid = employee.citizenid,
                 grade = employee.grade,
                 wage = employee.wage,
-                name = charinfo.firstname .. ' ' .. charinfo.lastname,
+                name = charinfo.fullname,
+                full_name = charinfo.fullname,
                 business_name = employee.business_name,
                 job_name = employee.job_name,
+                charinfo = charinfo,
                 last_updated = os.time()
             })
         end
@@ -57,15 +94,17 @@ function Employees.RefreshCache(businessId)
     
     if result then
         for _, employee in pairs(result) do
-            local charinfo = json.decode(employee.charinfo or '{}')
+            local charinfo = normalizeCharinfo(employee.charinfo)
             table.insert(employees, {
                 id = employee.id,
                 citizenid = employee.citizenid,
                 grade = employee.grade,
                 wage = employee.wage,
-                name = charinfo.firstname .. ' ' .. charinfo.lastname,
+                name = charinfo.fullname,
+                full_name = charinfo.fullname,
                 business_name = employee.business_name,
                 job_name = employee.job_name,
+                charinfo = charinfo,
                 last_updated = os.time()
             })
         end
@@ -176,17 +215,19 @@ function Employees.GetAll(businessId)
     local employees = {}
     if result then
         for _, employee in pairs(result) do
-            local charinfo = json.decode(employee.charinfo or '{}')
+            local charinfo = normalizeCharinfo(employee.charinfo)
             table.insert(employees, {
                 id = employee.id,
                 citizenid = employee.citizenid,
                 grade = employee.grade,
                 wage = employee.wage,
-                name = charinfo.firstname .. ' ' .. charinfo.lastname
+                name = charinfo.fullname,
+                full_name = charinfo.fullname,
+                charinfo = charinfo
             })
         end
     end
-    
+
     return employees
 end
 

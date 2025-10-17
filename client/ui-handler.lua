@@ -61,9 +61,28 @@ end)
 RegisterNUICallback('advance-manager:hireEmployee', function(data, cb)
     lib.callback('advance-manager:getPlayerBusiness', false, function(business)
         if business then
+            local wage = tonumber(data.wage)
+            local playerId = tonumber(data.playerId)
+            local grade = tonumber(data.grade)
+
+            if not wage or wage <= 0 then
+                cb(false, 'Invalid wage provided')
+                return
+            end
+
+            if not playerId or playerId <= 0 then
+                cb(false, 'Invalid player ID')
+                return
+            end
+
+            if not grade then
+                cb(false, 'Invalid grade')
+                return
+            end
+
             lib.callback('advance-manager:hireEmployee', false, function(success, message)
                 cb(success, message)
-            end, business.id, data.playerId, data.grade, data.wage)
+            end, business.id, playerId, grade, wage)
         else
             cb(false, 'No business found')
         end
@@ -73,9 +92,16 @@ end)
 RegisterNUICallback('advance-manager:fireEmployee', function(data, cb)
     lib.callback('advance-manager:getPlayerBusiness', false, function(business)
         if business then
+            local citizenId = data.citizenid
+
+            if type(citizenId) ~= 'string' or citizenId == '' then
+                cb(false, 'Invalid citizen ID')
+                return
+            end
+
             lib.callback('advance-manager:fireEmployee', false, function(success, message)
                 cb(success, message)
-            end, business.id, data.employeeId)
+            end, business.id, citizenId)
         else
             cb(false, 'No business found')
         end
@@ -97,9 +123,22 @@ end)
 RegisterNUICallback('advance-manager:updateEmployeeWage', function(data, cb)
     lib.callback('advance-manager:getPlayerBusiness', false, function(business)
         if business then
+            local citizenId = data.citizenid
+            local newWage = tonumber(data.newWage)
+
+            if type(citizenId) ~= 'string' or citizenId == '' then
+                cb(false, 'Invalid citizen ID')
+                return
+            end
+
+            if not newWage or newWage <= 0 then
+                cb(false, 'Invalid wage amount')
+                return
+            end
+
             lib.callback('advance-manager:updateEmployeeWage', false, function(success, message)
                 cb(success, message)
-            end, business.id, data.employeeId, data.newWage)
+            end, business.id, citizenId, newWage)
         else
             cb(false, 'No business found')
         end
@@ -109,9 +148,28 @@ end)
 RegisterNUICallback('advance-manager:updateEmployeeGrade', function(data, cb)
     lib.callback('advance-manager:getPlayerBusiness', false, function(business)
         if business then
+            local citizenId = data.citizenid
+            local newGrade = tonumber(data.newGrade)
+            local wage = data.wage and tonumber(data.wage) or nil
+
+            if type(citizenId) ~= 'string' or citizenId == '' then
+                cb(false, 'Invalid citizen ID')
+                return
+            end
+
+            if not newGrade or newGrade < 0 then
+                cb(false, 'Invalid grade level')
+                return
+            end
+
+            if wage ~= nil and wage <= 0 then
+                cb(false, 'Invalid wage amount')
+                return
+            end
+
             lib.callback('advance-manager:updateEmployeeGrade', false, function(success, message)
                 cb(success, message)
-            end, business.id, data.employeeId, data.newGrade)
+            end, business.id, citizenId, newGrade)
         else
             cb(false, 'No business found')
         end
