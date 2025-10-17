@@ -1,21 +1,30 @@
+const isFiveMEnvironment = typeof GetParentResourceName !== 'undefined';
+
+const defaultMockBusiness = {
+    id: 1,
+    name: 'Los Santos Police Department',
+    jobName: 'police',
+    jobLabel: 'Police Department',
+    funds: 45230,
+    owner: 'ABC12345',
+    user: {
+        name: 'John Doe',
+        role: 'boss'
+    },
+    employees: [
+        { id: 1, name: 'Jane Smith', citizenid: 'DEF67890', grade: 2, wage: 45 },
+        { id: 2, name: 'Bob Johnson', citizenid: 'GHI01234', grade: 1, wage: 35 },
+        { id: 3, name: 'Alice Brown', citizenid: 'JKL56789', grade: 3, wage: 55 }
+    ]
+};
+
 // Funciones específicas para el manejo de negocios
 const BusinessAPI = {
     // Tabla de salarios por grado (simulado desde el servidor)
     wagesByGrade: [25, 35, 45, 55, 75],
 
     // Simular datos del negocio
-    currentBusiness: {
-        id: 1,
-        name: 'Los Santos Police Department',
-        jobName: 'police',
-        funds: 45230,
-        owner: 'ABC12345',
-        employees: [
-            { id: 1, name: 'Jane Smith', citizenid: 'DEF67890', grade: 2, wage: 45 },
-            { id: 2, name: 'Bob Johnson', citizenid: 'GHI01234', grade: 1, wage: 35 },
-            { id: 3, name: 'Alice Brown', citizenid: 'JKL56789', grade: 3, wage: 55 }
-        ]
-    },
+    currentBusiness: isFiveMEnvironment ? {} : { ...defaultMockBusiness },
     
     // Obtener información del negocio
     getBusinessInfo() {
@@ -279,9 +288,11 @@ const BusinessAPI = {
 // Extender BusinessManager con funciones API
 if (typeof BusinessManager !== 'undefined') {
     Object.assign(BusinessManager, {
-        syncedEmployees: Array.isArray(BusinessAPI.currentBusiness?.employees)
-            ? [...BusinessAPI.currentBusiness.employees]
-            : [],
+        syncedEmployees: isFiveMEnvironment
+            ? []
+            : (Array.isArray(BusinessAPI.currentBusiness?.employees)
+                ? [...BusinessAPI.currentBusiness.employees]
+                : []),
 
         setSyncedEmployees(employees = []) {
             const normalized = Array.isArray(employees) ? [...employees] : [];

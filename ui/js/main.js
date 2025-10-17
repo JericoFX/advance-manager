@@ -8,7 +8,12 @@ const BusinessManager = {
     
     init() {
         this.bindEvents();
-        this.showPanel(); // Para testing en navegador
+
+        const shouldAutoOpen = typeof FiveMCallbacks === 'undefined' || !FiveMCallbacks.isFiveM;
+
+        if (shouldAutoOpen) {
+            this.showPanel(); // Para testing en navegador
+        }
     },
     
     bindEvents() {
@@ -64,7 +69,14 @@ const BusinessManager = {
         this.isOpen = true;
         $('#overlay').addClass('active');
         $('#businessPanel').addClass('active');
-        
+
+        if (typeof FiveMCallbacks !== 'undefined' && FiveMCallbacks.isFiveM) {
+            if (typeof this.loadBusinessData === 'function') {
+                this.loadBusinessData();
+            }
+            return;
+        }
+
         // Simular datos para testing
         this.loadMockData();
     },
@@ -188,45 +200,60 @@ const BusinessManager = {
     },
     
     showEmployeesList() {
-        // Simular lista de empleados
-        const employees = [
-            { id: 1, name: 'Jane Smith', grade: 2, wage: 45 },
-            { id: 2, name: 'Bob Johnson', grade: 1, wage: 35 },
-            { id: 3, name: 'Alice Brown', grade: 3, wage: 55 }
-        ];
-        
+        if (typeof EmployeeManager !== 'undefined' && typeof EmployeeManager.showEmployeesList === 'function') {
+            EmployeeManager.showEmployeesList();
+            return;
+        }
+
+        // Fallback rápido en caso de que EmployeeManager no esté disponible
+        const employees = typeof this.getSyncedEmployees === 'function'
+            ? this.getSyncedEmployees()
+            : [];
         let body = '<div class="employees-list">';
-        
-        employees.forEach(emp => {
+
+        if (employees.length === 0) {
             body += `
-                <div class="employee-item" style="
-                    background: rgba(51, 65, 85, 0.3);
-                    border: 1px solid var(--border-color);
-                    border-radius: 8px;
-                    padding: 1rem;
-                    margin-bottom: 0.75rem;
-                    display: flex;
-                    justify-content: space-between;
-                    align-items: center;
+                <div style="
+                    text-align: center;
+                    padding: 2rem;
+                    color: var(--text-muted);
                 ">
-                    <div>
-                        <div style="font-weight: 600; color: var(--text-primary);">${emp.name}</div>
-                        <div style="color: var(--text-secondary); font-size: 0.875rem;">Grade ${emp.grade} • $${emp.wage}/hour</div>
-                    </div>
-                    <div style="display: flex; gap: 0.5rem;">
-                        <button class="btn btn-info" style="padding: 0.5rem 1rem; font-size: 0.75rem;" onclick="BusinessManager.editEmployee(${emp.id})">
-                            <i class="fas fa-edit"></i>
-                        </button>
-                        <button class="btn btn-danger" style="padding: 0.5rem 1rem; font-size: 0.75rem;" onclick="BusinessManager.fireEmployee(${emp.id})">
-                            <i class="fas fa-trash"></i>
-                        </button>
-                    </div>
+                    <i class="fas fa-user-slash" style="font-size: 2rem; margin-bottom: 1rem;"></i>
+                    <p>No employees found</p>
                 </div>
             `;
-        });
-        
+        } else {
+            employees.forEach(emp => {
+                body += `
+                    <div class="employee-item" style="
+                        background: rgba(51, 65, 85, 0.3);
+                        border: 1px solid var(--border-color);
+                        border-radius: 8px;
+                        padding: 1rem;
+                        margin-bottom: 0.75rem;
+                        display: flex;
+                        justify-content: space-between;
+                        align-items: center;
+                    ">
+                        <div>
+                            <div style="font-weight: 600; color: var(--text-primary);">${emp.name}</div>
+                            <div style="color: var(--text-secondary); font-size: 0.875rem;">Grade ${emp.grade} • $${emp.wage}/hour</div>
+                        </div>
+                        <div style="display: flex; gap: 0.5rem;">
+                            <button class="btn btn-info" style="padding: 0.5rem 1rem; font-size: 0.75rem;" onclick="BusinessManager.editEmployee(${emp.id})">
+                                <i class="fas fa-edit"></i>
+                            </button>
+                            <button class="btn btn-danger" style="padding: 0.5rem 1rem; font-size: 0.75rem;" onclick="BusinessManager.fireEmployee(${emp.id})">
+                                <i class="fas fa-trash"></i>
+                            </button>
+                        </div>
+                    </div>
+                `;
+            });
+        }
+
         body += '</div>';
-        
+
         this.showModal('Manage Employees', body, 'Close');
         this.currentAction = 'manage';
     },
@@ -350,17 +377,117 @@ const BusinessManager = {
         }
     },
     
-    loadMockData() {
-        // Simular datos de prueba
-        $('#jobTitle span').text('Police Department');
-        $('#businessName').text('Los Santos Police Department');
-        $('#businessFunds').text('$45,230');
-        $('#totalEmployees').text('8');
-        
-        // Simular rol de usuario
+    applyBusinessData(business = {}) {
+        const jobLabel = business.jobLabel
+            || business.job_label
+            || (business.job && business.job.label)
+            || business.job_name
+            || business.jobName
+            || 'Business';
+        $('#jobTitle span').text(jobLabel);
+
+        if (business.name) {
+            $('#businessName').text(business.name);
+        }
+
+        if (Number.isFinite(business.funds)) {
+            this.updateFunds(business.funds);
+        } else if (typeof business.funds === 'string') {
+            $('#businessFunds').text(business.funds);
+        }
+
+        const employeesFromState = typeof this.getSyncedEmployees === 'function'
+            ? this.getSyncedEmployees()
+            : [];
+        const employees = Array.isArray(business.employees)
+            ? business.employees
+            : (Array.isArray(employeesFromState) ? employeesFromState : []);
+
+        if (Array.isArray(business.employees) && typeof this.setSyncedEmployees === 'function') {
+            this.setSyncedEmployees(business.employees);
+        }
+
+        if (typeof BusinessAPI !== 'undefined') {
+            const previousBusiness = BusinessAPI.currentBusiness || {};
+            BusinessAPI.currentBusiness = {
+                ...previousBusiness,
+                ...business,
+                employees: Array.isArray(employees) ? [...employees] : (previousBusiness.employees || [])
+            };
+        }
+
+        this.updateEmployeeCount(Array.isArray(employees) ? employees.length : 0);
+
         const userRole = $('#userRole');
-        userRole.find('.role-badge').addClass('boss').text('BOSS');
-        userRole.find('.user-name').text('John Doe');
+        const roleBadge = userRole.find('.role-badge');
+        const userName = userRole.find('.user-name');
+
+        const roleFromData = (business.user && business.user.role)
+            || business.role
+            || (business.metadata && business.metadata.role)
+            || (business.isBoss || business.is_boss || business.isboss ? 'boss' : null);
+        const normalizedRole = roleFromData ? roleFromData.toString().toLowerCase() : null;
+
+        roleBadge.removeClass('boss employee viewer');
+
+        if (normalizedRole) {
+            roleBadge.addClass(normalizedRole);
+            roleBadge.text(normalizedRole.toUpperCase());
+        } else {
+            roleBadge.addClass('viewer');
+            roleBadge.text('VIEWER');
+        }
+
+        if (business.user && business.user.name) {
+            userName.text(business.user.name);
+        } else if (business.userName) {
+            userName.text(business.userName);
+        } else if (business.user_name) {
+            userName.text(business.user_name);
+        }
+    },
+
+    getDefaultMockBusiness() {
+        return {
+            jobLabel: 'Police Department',
+            jobName: 'police',
+            name: 'Los Santos Police Department',
+            funds: 45230,
+            employees: [
+                { id: 1, name: 'Jane Smith', citizenid: 'DEF67890', grade: 2, wage: 45 },
+                { id: 2, name: 'Bob Johnson', citizenid: 'GHI01234', grade: 1, wage: 35 },
+                { id: 3, name: 'Alice Brown', citizenid: 'JKL56789', grade: 3, wage: 55 }
+            ],
+            user: {
+                name: 'John Doe',
+                role: 'boss'
+            }
+        };
+    },
+
+    getWageForGrade(grade) {
+        if (!Number.isInteger(grade) || typeof BusinessAPI === 'undefined' || typeof BusinessAPI.getGrades !== 'function') {
+            return null;
+        }
+
+        const gradeInfo = BusinessAPI.getGrades().find(g => g.value === grade);
+        return gradeInfo && Number.isFinite(gradeInfo.wage) ? gradeInfo.wage : null;
+    },
+
+    loadMockData() {
+        if (typeof FiveMCallbacks !== 'undefined' && FiveMCallbacks.isFiveM) {
+            return;
+        }
+
+        if (typeof MockData !== 'undefined' && MockData.isActive) {
+            const business = MockData.getBusiness();
+            if (business) {
+                this.applyBusinessData(business);
+                return;
+            }
+        }
+
+        this.applyBusinessData(this.getDefaultMockBusiness());
     },
     
     getNearestPlayer() {
