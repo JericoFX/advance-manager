@@ -4,9 +4,13 @@ const EmployeeManager = {
     async showEmployeesList() {
         try {
             const employees = await BusinessAPI.getEmployees();
-            
+
+            if (typeof BusinessManager !== 'undefined' && typeof BusinessManager.setSyncedEmployees === 'function') {
+                BusinessManager.setSyncedEmployees(employees);
+            }
+
             let body = '<div class="employees-list">';
-            
+
             if (employees.length === 0) {
                 body += `
                     <div style="
@@ -127,8 +131,22 @@ const EmployeeManager = {
     
     // Mostrar modal de edición
     async showEditModal(employeeId) {
-        const employee = BusinessAPI.currentBusiness.employees.find(emp => emp.id === employeeId);
-        
+        let employees = [];
+
+        if (typeof BusinessManager !== 'undefined' && typeof BusinessManager.getSyncedEmployees === 'function') {
+            employees = BusinessManager.getSyncedEmployees();
+
+            if (!employees.length && typeof BusinessManager.syncEmployeesFromServer === 'function') {
+                employees = await BusinessManager.syncEmployeesFromServer();
+            }
+        } else if (BusinessAPI.currentBusiness?.employees) {
+            employees = BusinessAPI.currentBusiness.employees;
+        } else {
+            employees = await BusinessAPI.getEmployees();
+        }
+
+        const employee = employees.find(emp => emp.id === employeeId);
+
         if (!employee) {
             BusinessManager.showToast('Employee not found', 'error');
             return;
@@ -231,21 +249,41 @@ const EmployeeManager = {
         const employeeId = BusinessManager.editingEmployeeId;
         const newGrade = parseInt($('#editGrade').val());
         const newWage = parseInt($('#editWage').val());
-        
+
         if (!newWage || newWage < 10 || newWage > 100) {
             BusinessManager.showToast('Invalid wage amount (10-100)', 'error');
             return;
         }
-        
+
         try {
             BusinessManager.showLoading('Updating employee...');
-            
+
             // Actualizar grado si cambió
-            const employee = BusinessAPI.currentBusiness.employees.find(emp => emp.id === employeeId);
+            let employeeList = [];
+
+            if (typeof BusinessManager !== 'undefined' && typeof BusinessManager.getSyncedEmployees === 'function') {
+                employeeList = BusinessManager.getSyncedEmployees();
+            }
+
+            if ((!employeeList || employeeList.length === 0) && typeof BusinessManager.syncEmployeesFromServer === 'function') {
+                employeeList = await BusinessManager.syncEmployeesFromServer();
+            }
+
+            if (!employeeList || employeeList.length === 0) {
+                employeeList = BusinessAPI.currentBusiness?.employees || [];
+            }
+
+            const employee = employeeList.find(emp => emp.id === employeeId);
+
+            if (!employee) {
+                BusinessManager.hideLoading();
+                BusinessManager.showToast('Employee not found', 'error');
+                return;
+            }
             if (employee.grade !== newGrade) {
                 await BusinessAPI.updateEmployeeGrade(employeeId, newGrade);
             }
-            
+
             // Actualizar salario si cambió
             if (employee.wage !== newWage) {
                 await BusinessAPI.updateEmployeeWage(employeeId, newWage);
@@ -254,8 +292,13 @@ const EmployeeManager = {
             BusinessManager.hideLoading();
             BusinessManager.showToast('Employee updated successfully', 'success');
             BusinessManager.hideModal();
-            
-            // Refrescar lista
+
+            // Refrescar lista y sincronizar empleados
+            if (typeof BusinessManager.syncEmployeesFromServer === 'function') {
+                const refreshedEmployees = await BusinessManager.syncEmployeesFromServer();
+                BusinessManager.updateEmployeeCount(refreshedEmployees?.length);
+            }
+
             this.showEmployeesList();
         } catch (error) {
             BusinessManager.hideLoading();
@@ -266,16 +309,23 @@ const EmployeeManager = {
     // Manejar confirmación de despido
     async handleConfirmFire() {
         const employeeId = BusinessManager.firingEmployeeId;
-        
+
         try {
             BusinessManager.showLoading('Firing employee...');
             const result = await BusinessAPI.fireEmployee(employeeId);
             BusinessManager.hideLoading();
-            
+
             BusinessManager.showToast(result.message, 'success');
-            BusinessManager.updateEmployeeCount();
             BusinessManager.hideModal();
-            
+
+            let syncedEmployees = [];
+
+            if (typeof BusinessManager.syncEmployeesFromServer === 'function') {
+                syncedEmployees = await BusinessManager.syncEmployeesFromServer();
+            }
+
+            BusinessManager.updateEmployeeCount(syncedEmployees?.length);
+
             // Refrescar lista
             this.showEmployeesList();
         } catch (error) {

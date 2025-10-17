@@ -19,7 +19,17 @@ const BusinessAPI = {
         return new Promise((resolve) => {
             // Simular delay de API
             setTimeout(() => {
-                resolve(this.currentBusiness);
+                const business = { ...this.currentBusiness };
+
+                if (typeof BusinessManager !== 'undefined' && typeof BusinessManager.setSyncedEmployees === 'function') {
+                    BusinessManager.setSyncedEmployees(business.employees || []);
+                }
+
+                if (typeof BusinessManager !== 'undefined' && typeof BusinessManager.updateEmployeeCount === 'function') {
+                    BusinessManager.updateEmployeeCount(business.employees?.length);
+                }
+
+                resolve(business);
             }, 500);
         });
     },
@@ -104,11 +114,15 @@ const BusinessAPI = {
                     grade: grade,
                     wage: assignedWage
                 };
-                
+
                 this.currentBusiness.employees.push(newEmployee);
-                
-                resolve({ 
-                    success: true, 
+
+                if (typeof BusinessManager !== 'undefined' && typeof BusinessManager.setSyncedEmployees === 'function') {
+                    BusinessManager.setSyncedEmployees(this.currentBusiness.employees);
+                }
+
+                resolve({
+                    success: true,
                     message: `Successfully hired ${randomName} at grade ${grade}`,
                     employee: newEmployee
                 });
@@ -129,9 +143,13 @@ const BusinessAPI = {
                 
                 const employee = this.currentBusiness.employees[employeeIndex];
                 this.currentBusiness.employees.splice(employeeIndex, 1);
-                
-                resolve({ 
-                    success: true, 
+
+                if (typeof BusinessManager !== 'undefined' && typeof BusinessManager.setSyncedEmployees === 'function') {
+                    BusinessManager.setSyncedEmployees(this.currentBusiness.employees);
+                }
+
+                resolve({
+                    success: true,
                     message: `${employee.name} has been fired`,
                     employee: employee
                 });
@@ -156,9 +174,13 @@ const BusinessAPI = {
                 }
                 
                 employee.wage = newWage;
-                
-                resolve({ 
-                    success: true, 
+
+                if (typeof BusinessManager !== 'undefined' && typeof BusinessManager.setSyncedEmployees === 'function') {
+                    BusinessManager.setSyncedEmployees(this.currentBusiness.employees);
+                }
+
+                resolve({
+                    success: true,
                     message: `Updated ${employee.name}'s wage to $${newWage}/hour`,
                     employee: employee
                 });
@@ -183,9 +205,13 @@ const BusinessAPI = {
                 }
                 
                 employee.grade = newGrade;
-                
-                resolve({ 
-                    success: true, 
+
+                if (typeof BusinessManager !== 'undefined' && typeof BusinessManager.setSyncedEmployees === 'function') {
+                    BusinessManager.setSyncedEmployees(this.currentBusiness.employees);
+                }
+
+                resolve({
+                    success: true,
                     message: `Updated ${employee.name}'s grade to ${newGrade}`,
                     employee: employee
                 });
@@ -197,7 +223,17 @@ const BusinessAPI = {
     getEmployees() {
         return new Promise((resolve) => {
             setTimeout(() => {
-                resolve(this.currentBusiness.employees);
+                const employees = this.currentBusiness.employees;
+
+                if (typeof BusinessManager !== 'undefined' && typeof BusinessManager.setSyncedEmployees === 'function') {
+                    BusinessManager.setSyncedEmployees(employees);
+                }
+
+                if (typeof BusinessManager !== 'undefined' && typeof BusinessManager.updateEmployeeCount === 'function') {
+                    BusinessManager.updateEmployeeCount(employees?.length);
+                }
+
+                resolve(employees);
             }, 500);
         });
     },
@@ -234,6 +270,33 @@ const BusinessAPI = {
 // Extender BusinessManager con funciones API
 if (typeof BusinessManager !== 'undefined') {
     Object.assign(BusinessManager, {
+        syncedEmployees: Array.isArray(BusinessAPI.currentBusiness?.employees)
+            ? [...BusinessAPI.currentBusiness.employees]
+            : [],
+
+        setSyncedEmployees(employees = []) {
+            const normalized = Array.isArray(employees) ? [...employees] : [];
+            this.syncedEmployees = normalized;
+
+            if (BusinessAPI.currentBusiness) {
+                BusinessAPI.currentBusiness.employees = [...normalized];
+            }
+        },
+
+        getSyncedEmployees() {
+            return Array.isArray(this.syncedEmployees) ? this.syncedEmployees : [];
+        },
+
+        async syncEmployeesFromServer() {
+            try {
+                const employees = await BusinessAPI.getEmployees();
+                return employees;
+            } catch (error) {
+                console.error('Failed to sync employees from server', error);
+                return this.getSyncedEmployees();
+            }
+        },
+
         // Sobrescribir funciones para usar API simulada
         async handleDeposit() {
             const amount = parseInt($('#depositAmount').val());
@@ -290,25 +353,37 @@ if (typeof BusinessManager !== 'undefined') {
                 this.showLoading('Hiring employee...');
                 const result = await BusinessAPI.hireEmployee(playerId, grade);
                 this.hideLoading();
-                
+
                 this.showToast(result.message, 'success');
-                this.updateEmployeeCount();
+
+                let employees;
+                if (typeof this.syncEmployeesFromServer === 'function') {
+                    employees = await this.syncEmployeesFromServer();
+                }
+
+                this.updateEmployeeCount(employees?.length);
                 this.hideModal();
             } catch (error) {
                 this.hideLoading();
                 this.showToast(error.error || 'Failed to hire employee', 'error');
             }
         },
-        
+
         async fireEmployee(id) {
             try {
                 this.showLoading('Firing employee...');
                 const result = await BusinessAPI.fireEmployee(id);
                 this.hideLoading();
-                
+
                 this.showToast(result.message, 'success');
-                this.updateEmployeeCount();
-                
+
+                let employees;
+                if (typeof this.syncEmployeesFromServer === 'function') {
+                    employees = await this.syncEmployeesFromServer();
+                }
+
+                this.updateEmployeeCount(employees?.length);
+
                 // Actualizar lista si está abierta
                 if (this.currentAction === 'manage') {
                     this.showEmployeesList();
@@ -318,11 +393,17 @@ if (typeof BusinessManager !== 'undefined') {
                 this.showToast(error.error || 'Failed to fire employee', 'error');
             }
         },
-        
-        updateEmployeeCount() {
-            $('#totalEmployees').text(BusinessAPI.currentBusiness.employees.length);
+
+        updateEmployeeCount(count) {
+            if (typeof count === 'number') {
+                $('#totalEmployees').text(count);
+                return;
+            }
+
+            const employees = this.getSyncedEmployees();
+            $('#totalEmployees').text(employees.length);
         },
-        
+
         showLoading(message) {
             // Crear overlay de carga
             const loader = $(`
