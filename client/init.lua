@@ -41,7 +41,7 @@ local function ShowCreateBusinessMenu()
     })
     
     if input then
-        TriggerServerEvent('advance-manager:createBusiness', input[1], input[2], input[3], input[4])
+        TriggerServerEvent('advance-manager:createBusinessFromClient', input[1], input[2], input[3], input[4])
     end
 end
 
@@ -385,11 +385,6 @@ lib.addCommand('businessmenu', {
     help = 'Open business management menu'
 }, function(source, args, raw)
     ShowBusinessManagementMenu()
-end)
-
--- Server events
-RegisterNetEvent('advance-manager:createBusiness', function(name, ownerId, jobName, funds)
-    TriggerServerEvent('advance-manager:createBusinessFromClient', name, ownerId, jobName, funds)
 end)
 
 print('[advance-manager] Client initialized successfully')
