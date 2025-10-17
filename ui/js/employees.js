@@ -135,6 +135,8 @@ const EmployeeManager = {
         }
         
         const grades = BusinessAPI.getGrades();
+        const gradeWage = BusinessAPI.getWageForGrade(employee.grade);
+        const initialWage = Number.isInteger(gradeWage) ? gradeWage : employee.wage;
         let gradeOptions = '';
         
         grades.forEach(grade => {
@@ -158,10 +160,11 @@ const EmployeeManager = {
                 
                 <div class="input-group">
                     <label class="input-label">Hourly Wage</label>
-                    <input type="text" class="input-field" id="editWage" 
-                           value="$${employee.wage}/hour" readonly 
+                    <input type="hidden" id="editWageValue" value="${initialWage}">
+                    <input type="text" class="input-field" id="editWageDisplay"
+                           value="$${initialWage}/hour" readonly
                            style="opacity: 0.6; cursor: not-allowed;">
-                    <p style="color: var(--text-muted); font-size: 0.75rem; margin-top: 0.25rem;">Wage is automatically set based on grade from QBCore shared</p>
+                    <p id="editWageFeedback" style="color: var(--text-muted); font-size: 0.75rem; margin-top: 0.25rem;">Wage is automatically set based on grade from QBCore shared</p>
                 </div>
                 
                 <div style="
@@ -192,6 +195,32 @@ const EmployeeManager = {
         BusinessManager.showModal('Edit Employee', body, 'Save Changes');
         BusinessManager.currentAction = 'editEmployee';
         BusinessManager.editingEmployeeId = employeeId;
+
+        const updateWageUI = (wage) => {
+            const $display = $('#editWageDisplay');
+            const $feedback = $('#editWageFeedback');
+
+            if (Number.isInteger(wage)) {
+                $('#editWageValue').val(wage);
+                $display.val(`$${wage}/hour`);
+                $feedback.text(`Hourly wage set to $${wage}/hour based on grade selection.`);
+                $feedback.css('color', 'var(--text-muted)');
+            } else {
+                $('#editWageValue').val('');
+                $display.val('N/A');
+                $feedback.text('Unable to calculate wage for the selected grade.');
+                $feedback.css('color', 'var(--warning-color)');
+            }
+        };
+
+        const $gradeSelect = $('#editGrade');
+        $gradeSelect.off('change.employeeEdit').on('change.employeeEdit', (event) => {
+            const selectedGrade = parseInt($(event.currentTarget).val(), 10);
+            const wage = BusinessAPI.getWageForGrade(selectedGrade);
+            updateWageUI(wage);
+        });
+
+        updateWageUI(initialWage);
     },
     
     // Confirmar despido
@@ -229,10 +258,24 @@ const EmployeeManager = {
     // Manejar edición de empleado
     async handleEditEmployee() {
         const employeeId = BusinessManager.editingEmployeeId;
-        const newGrade = parseInt($('#editGrade').val());
-        const newWage = parseInt($('#editWage').val());
-        
-        if (!newWage || newWage < 10 || newWage > 100) {
+        const newGrade = parseInt($('#editGrade').val(), 10);
+
+        if (!Number.isInteger(newGrade)) {
+            BusinessManager.showToast('Please select a valid grade', 'error');
+            return;
+        }
+
+        let newWage = Number($('#editWageValue').val());
+
+        if (!Number.isInteger(newWage)) {
+            const recalculatedWage = BusinessAPI.getWageForGrade(newGrade);
+            if (Number.isInteger(recalculatedWage)) {
+                newWage = recalculatedWage;
+                $('#editWageValue').val(recalculatedWage);
+            }
+        }
+
+        if (!Number.isInteger(newWage) || newWage < 10 || newWage > 100) {
             BusinessManager.showToast('Invalid wage amount (10-100)', 'error');
             return;
         }
