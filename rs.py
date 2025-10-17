@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Utility helpers for extracting and repacking Asura RSFL archives.
+"""Utility helpers for extracting and repacking Asura RS managed archives.
 
 The original RSFL_ASR.cpp tool published by Trololp/Vhetration only supported
 extracting data from an RSFL chunk.  This script extends that behaviour so the
@@ -18,17 +18,16 @@ resource referenced by the RSFL table into ``<output_dir>``.  In addition it
 creates ``manifest.json`` which records the offsets and sizes of all entries as
 they appear in the archive.  The manifest is later consumed by *repack*.
 
-The *repack* command keeps the layout of the original archive intact.  It
-produces an updated copy where each entry listed in ``manifest.json`` is
-replaced by the corresponding file located inside ``<input_dir>``.  Repacking is
-safe as long as the modified files keep their original size – that is the
-requirement imposed by the RSFL table because changing the size would break the
-offset map for the rest of the archive.
+The *repack* command keeps the layout of the original archive intact.  RSFL
+entries can grow or shrink in size – the script appends resized payloads to the
+end of the archive and updates the offset table accordingly.  RSCF controlled
+entries must preserve their original size because their payload is embedded
+inside fixed-width chunks whose headers would otherwise need to be rewritten.
 
 While this script is intentionally conservative it enables a fast edit cycle:
 extract ➜ tweak asset ➜ repack.  The RSFL manifest contains enough contextual
-information so that a future enhancement could also grow/shrink assets and
-rebuild the RSFL table from scratch.
+information so that a future enhancement could also rebuild the RSCF chunk
+headers when supporting payloads that change size.
 """
 
 from __future__ import annotations
@@ -58,12 +57,22 @@ except Exception:  # pragma: no cover - Tkinter availability is platform specifi
 Image = None
 ImageTk = None
 UnidentifiedImageError = Exception
+PIL_AVAILABLE = False
+PIL_IMAGETK_AVAILABLE = False
 try:  # pragma: no cover - Pillow availability depends on the environment.
-    from PIL import Image, ImageTk, UnidentifiedImageError
+    from PIL import Image, UnidentifiedImageError
 
     PIL_AVAILABLE = True
 except Exception:  # pragma: no cover - Pillow availability depends on the environment.
-    PIL_AVAILABLE = False
+    pass
+
+if PIL_AVAILABLE:
+    try:  # pragma: no cover - ImageTk availability depends on the environment.
+        from PIL import ImageTk
+
+        PIL_IMAGETK_AVAILABLE = True
+    except Exception:  # pragma: no cover - ImageTk availability depends on the environment.
+        pass
 
 ASURA_MAGIC = b"Asura   "
 ASURA_ZLB_MAGIC = b"AsuraZlb"
@@ -778,6 +787,13 @@ class TextureManagerGUI:
             self._clear_preview("Pillow is not installed; preview unavailable")
             self._set_status(
                 "Preview unavailable: install Pillow to enable texture previews"
+            )
+            return
+
+        if not PIL_IMAGETK_AVAILABLE:
+            self._clear_preview("Install Pillow's ImageTk support to preview textures")
+            self._set_status(
+                "Preview unavailable: install pillow[tk] or python3-tk for ImageTk"
             )
             return
 
