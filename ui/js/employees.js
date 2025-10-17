@@ -181,6 +181,8 @@ const EmployeeManager = {
         const wageFromDataset = dataset.wage ? parseInt(dataset.wage, 10) : employee.wage;
         
         const grades = BusinessAPI.getGrades();
+        const gradeWage = BusinessAPI.getWageForGrade(employee.grade);
+        const initialWage = Number.isInteger(gradeWage) ? gradeWage : employee.wage;
         let gradeOptions = '';
         
         grades.forEach(grade => {
@@ -208,7 +210,7 @@ const EmployeeManager = {
                            value="${wageFromDataset}"
                            readonly data-wage="${wageFromDataset}"
                            style="opacity: 0.6; cursor: not-allowed;">
-                    <p style="color: var(--text-muted); font-size: 0.75rem; margin-top: 0.25rem;">Wage is automatically set based on grade from QBCore shared</p>
+                    <p id="editWageFeedback" style="color: var(--text-muted); font-size: 0.75rem; margin-top: 0.25rem;">Wage is automatically set based on grade from QBCore shared</p>
                 </div>
 
                 <div style="

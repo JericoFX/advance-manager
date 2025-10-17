@@ -1,5 +1,8 @@
 // Funciones específicas para el manejo de negocios
 const BusinessAPI = {
+    // Tabla de salarios por grado (simulado desde el servidor)
+    wagesByGrade: [25, 35, 45, 55, 75],
+
     // Simular datos del negocio
     currentBusiness: {
         id: 1,
@@ -247,6 +250,12 @@ const BusinessAPI = {
             { value: 3, label: 'Grade 3 - Lieutenant', wage: 55 },
             { value: 4, label: 'Grade 4 - Captain', wage: 75 }
         ];
+    },
+
+    // Obtener sueldo por grado
+    getWageForGrade(grade) {
+        const wage = this.wagesByGrade[grade];
+        return Number.isInteger(wage) ? wage : null;
     },
     
     // Formatear dinero
