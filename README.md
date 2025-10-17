@@ -152,7 +152,7 @@ The repository ships with `rs.py`, a standalone helper for extracting and repack
 
 ### Automated executables
 
-A GitHub Actions workflow (`package-rs.yml`) builds standalone binaries using PyInstaller for both Windows (`rs.exe`) and Linux (`rs`) and publishes them as workflow artifacts. Download the artifact for your platform from the workflow run summary to obtain the latest packaged version of the tool.
+A GitHub Actions workflow (`package-rs.yml`) builds standalone binaries using PyInstaller for both Windows (`rs.exe`) and Linux (`rs`). Every push to `main` or a pull request run produces downloadable artifacts, and tagging a release with the pattern `v*` automatically creates a GitHub Release that bundles the packaged binaries for both platforms.
 
 If you prefer manual packaging, install PyInstaller locally and run:
 
