@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Utility helpers for extracting and repacking Asura RSFL archives.
+"""Utility helpers for extracting and repacking Asura RS managed archives.
 
 The original RSFL_ASR.cpp tool published by Trololp/Vhetration only supported
 extracting data from an RSFL chunk.  This script extends that behaviour so the
@@ -18,17 +18,16 @@ resource referenced by the RSFL table into ``<output_dir>``.  In addition it
 creates ``manifest.json`` which records the offsets and sizes of all entries as
 they appear in the archive.  The manifest is later consumed by *repack*.
 
-The *repack* command keeps the layout of the original archive intact.  It
-produces an updated copy where each entry listed in ``manifest.json`` is
-replaced by the corresponding file located inside ``<input_dir>``.  Repacking is
-safe as long as the modified files keep their original size – that is the
-requirement imposed by the RSFL table because changing the size would break the
-offset map for the rest of the archive.
+The *repack* command keeps the layout of the original archive intact.  RSFL
+entries can grow or shrink in size – the script appends resized payloads to the
+end of the archive and updates the offset table accordingly.  RSCF controlled
+entries must preserve their original size because their payload is embedded
+inside fixed-width chunks whose headers would otherwise need to be rewritten.
 
 While this script is intentionally conservative it enables a fast edit cycle:
 extract ➜ tweak asset ➜ repack.  The RSFL manifest contains enough contextual
-information so that a future enhancement could also grow/shrink assets and
-rebuild the RSFL table from scratch.
+information so that a future enhancement could also rebuild the RSCF chunk
+headers when supporting payloads that change size.
 """
 
 from __future__ import annotations
@@ -58,12 +57,22 @@ except Exception:  # pragma: no cover - Tkinter availability is platform specifi
 Image = None
 ImageTk = None
 UnidentifiedImageError = Exception
+PIL_AVAILABLE = False
+PIL_IMAGETK_AVAILABLE = False
 try:  # pragma: no cover - Pillow availability depends on the environment.
-    from PIL import Image, ImageTk, UnidentifiedImageError
+    from PIL import Image, UnidentifiedImageError
 
     PIL_AVAILABLE = True
 except Exception:  # pragma: no cover - Pillow availability depends on the environment.
-    PIL_AVAILABLE = False
+    pass
+
+if PIL_AVAILABLE:
+    try:  # pragma: no cover - ImageTk availability depends on the environment.
+        from PIL import ImageTk
+
+        PIL_IMAGETK_AVAILABLE = True
+    except Exception:  # pragma: no cover - ImageTk availability depends on the environment.
+        pass
 
 ASURA_MAGIC = b"Asura   "
 ASURA_ZLB_MAGIC = b"AsuraZlb"
@@ -349,15 +358,39 @@ def _parse_rscf_entries(data: bytes, chunk_info: Dict[str, object]) -> List[Dict
     data_offset = int(header.get("data_offset", 0))
     data_span = int(header.get("data_span", 0))
 
-    cursor = header_offset + 12
-    name, consumed = _read_padded_string(data, cursor)
-    cursor += consumed + data_offset
+    string_offset = header_offset + 12
+    name, consumed = _read_padded_string(data, string_offset)
+    string_end = string_offset + consumed
 
-    payload_offset = cursor
-    payload_end = payload_offset + data_span
     chunk_end = chunk_offset + chunk_size
 
-    if payload_end > chunk_end or payload_end > len(data):
+    candidate_offsets: List[int] = []
+
+    def _register_candidate(value: int) -> None:
+        if value not in candidate_offsets:
+            candidate_offsets.append(value)
+
+    _register_candidate(string_end + data_offset)
+
+    masked_offset = data_offset & 0x00FFFFFF
+    if masked_offset != data_offset:
+        _register_candidate(string_end + masked_offset)
+
+    _register_candidate(chunk_end - data_span)
+
+    payload_offset = None
+    payload_end = None
+    for candidate in candidate_offsets:
+        if candidate < string_end:
+            continue
+        end = candidate + data_span
+        if end > chunk_end or end > len(data):
+            continue
+        payload_offset = candidate
+        payload_end = end
+        break
+
+    if payload_offset is None or payload_end is None:
         raise RSFLParsingError("RSCF payload exceeds chunk bounds")
 
     relative_name = normalize_relative_path(name)
@@ -693,6 +726,27 @@ class TextureManagerGUI:
         )
         self.preview_label.grid(row=0, column=0, sticky="nsew")
         self.preview_image = None
+        self.preview_source_image = None
+
+        channel_frame = tk.Frame(preview_frame)
+        channel_frame.grid(row=1, column=0, sticky="ew", padx=4, pady=(6, 2))
+        for column in range(4):
+            channel_frame.columnconfigure(column, weight=1)
+
+        self.channel_vars = {}
+        self.channel_buttons = {}
+        for idx, channel in enumerate("RGBA"):
+            var = tk.IntVar(value=1)
+            btn = tk.Checkbutton(
+                channel_frame,
+                text=channel,
+                variable=var,
+                command=self._update_channel_preview,
+            )
+            btn.grid(row=0, column=idx, padx=2)
+            self.channel_vars[channel] = var
+            self.channel_buttons[channel] = btn
+        self._set_channel_controls_state("disabled")
 
         button_frame = tk.Frame(self.root)
         button_frame.grid(row=1, column=0, columnspan=2, sticky="ew", padx=10, pady=8)
@@ -739,6 +793,43 @@ class TextureManagerGUI:
             self.preview_label.configure(image="", text=message)
             self.preview_label.image = None
         self.preview_image = None
+        self.preview_source_image = None
+        self._set_channel_controls_state("disabled")
+
+    def _set_channel_controls_state(self, state: str) -> None:
+        for button in self.channel_buttons.values():
+            button.configure(state=state)
+        if state == "disabled":
+            for var in self.channel_vars.values():
+                var.set(1)
+
+    def _update_channel_preview(self) -> None:
+        if self.preview_source_image is None or not PIL_IMAGETK_AVAILABLE:
+            return
+
+        rgba = self.preview_source_image.split()
+        if len(rgba) != 4:
+            # Defensive: ensure we always have 4 channels to merge.
+            self.preview_label.configure(image="", text="Unsupported image mode")
+            self.preview_label.image = None
+            self.preview_image = None
+            return
+
+        r, g, b, a = rgba
+        if not self.channel_vars["R"].get():
+            r = Image.new("L", self.preview_source_image.size, 0)
+        if not self.channel_vars["G"].get():
+            g = Image.new("L", self.preview_source_image.size, 0)
+        if not self.channel_vars["B"].get():
+            b = Image.new("L", self.preview_source_image.size, 0)
+        if not self.channel_vars["A"].get():
+            a = Image.new("L", self.preview_source_image.size, 255)
+
+        composed = Image.merge("RGBA", (r, g, b, a))
+        photo = ImageTk.PhotoImage(composed)
+        self.preview_label.configure(image=photo, text="")
+        self.preview_label.image = photo
+        self.preview_image = photo
 
     def _on_entry_selected(self, _event: object) -> None:
         if self.archive_bytes is None or not self.entries:
@@ -754,6 +845,13 @@ class TextureManagerGUI:
             self._clear_preview("Pillow is not installed; preview unavailable")
             self._set_status(
                 "Preview unavailable: install Pillow to enable texture previews"
+            )
+            return
+
+        if not PIL_IMAGETK_AVAILABLE:
+            self._clear_preview("Install Pillow's ImageTk support to preview textures")
+            self._set_status(
+                "Preview unavailable: install pillow[tk] or python3-tk for ImageTk"
             )
             return
 
@@ -789,11 +887,14 @@ class TextureManagerGUI:
             )
             return
 
+        self.preview_source_image = image
+        self._set_channel_controls_state("normal")
         self.preview_label.configure(image=photo, text="")
         self.preview_label.image = photo
         self.preview_image = photo
         format_display = format_hint or detected_format or "unknown"
         self._set_status(f"Previewing {entry['relative_path']} ({format_display})")
+        self._update_channel_preview()
 
     # ------------------------------------------------------------- callbacks --
     def open_archive(self) -> None:
