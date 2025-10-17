@@ -717,9 +717,68 @@ class TextureManagerGUI:
         preview_frame.grid(row=0, column=1, sticky="nsew", padx=(10, 10), pady=10)
         preview_frame.rowconfigure(0, weight=1)
         preview_frame.columnconfigure(0, weight=1)
+        preview_frame.columnconfigure(1, weight=0)
+
+        self.preview_canvas = tk.Canvas(preview_frame, highlightthickness=0)
+        self.preview_canvas.grid(row=0, column=0, sticky="nsew")
+
+        self.preview_vscroll = tk.Scrollbar(
+            preview_frame, orient=tk.VERTICAL, command=self.preview_canvas.yview
+        )
+        self.preview_vscroll.grid(row=0, column=1, sticky="ns", rowspan=2)
+
+        self.preview_hscroll = tk.Scrollbar(
+            preview_frame, orient=tk.HORIZONTAL, command=self.preview_canvas.xview
+        )
+        self.preview_hscroll.grid(row=1, column=0, sticky="ew")
+
+        self.preview_canvas.configure(
+            yscrollcommand=self.preview_vscroll.set,
+            xscrollcommand=self.preview_hscroll.set,
+        )
+
+        self.preview_inner = tk.Frame(self.preview_canvas)
+        self.preview_window = self.preview_canvas.create_window(
+            (0, 0), window=self.preview_inner, anchor="nw"
+        )
+
+        def _update_scroll_region(event: object) -> None:
+            self.preview_canvas.configure(scrollregion=self.preview_canvas.bbox("all"))
+
+        self.preview_inner.bind("<Configure>", _update_scroll_region)
+
+        def _on_mousewheel(event: object) -> str | None:
+            delta = getattr(event, "delta", 0)
+            if delta:
+                step = int(delta / 120) if delta % 120 == 0 else int(delta / abs(delta))
+                if getattr(event, "state", 0) & 0x0001:  # Shift pressed
+                    self.preview_canvas.xview_scroll(-step, "units")
+                else:
+                    self.preview_canvas.yview_scroll(-step, "units")
+                return "break"
+
+        def _on_shift_wheel(event: object) -> str | None:
+            delta = getattr(event, "delta", 0)
+            if delta:
+                step = int(delta / 120) if delta % 120 == 0 else int(delta / abs(delta))
+                self.preview_canvas.xview_scroll(-step, "units")
+                return "break"
+
+        def _on_wheel_up(event: object) -> str:
+            self.preview_canvas.yview_scroll(-1, "units")
+            return "break"
+
+        def _on_wheel_down(event: object) -> str:
+            self.preview_canvas.yview_scroll(1, "units")
+            return "break"
+
+        self.preview_canvas.bind("<MouseWheel>", _on_mousewheel)
+        self.preview_canvas.bind("<Shift-MouseWheel>", _on_shift_wheel)
+        self.preview_canvas.bind("<Button-4>", _on_wheel_up)
+        self.preview_canvas.bind("<Button-5>", _on_wheel_down)
 
         self.preview_label = tk.Label(
-            preview_frame,
+            self.preview_inner,
             text="Select a texture to preview",
             anchor="center",
             justify="center",
@@ -729,7 +788,7 @@ class TextureManagerGUI:
         self.preview_source_image = None
 
         channel_frame = tk.Frame(preview_frame)
-        channel_frame.grid(row=1, column=0, sticky="ew", padx=4, pady=(6, 2))
+        channel_frame.grid(row=2, column=0, columnspan=2, sticky="ew", padx=4, pady=(6, 2))
         for column in range(4):
             channel_frame.columnconfigure(column, weight=1)
 
@@ -786,12 +845,24 @@ class TextureManagerGUI:
     def _set_status(self, message: str) -> None:
         self.status.set(message)
 
+    def _update_preview_scrollregion(self, reset_position: bool = False) -> None:
+        if not hasattr(self, "preview_canvas"):
+            return
+        bbox = self.preview_canvas.bbox("all")
+        if bbox is None:
+            bbox = (0, 0, 0, 0)
+        self.preview_canvas.configure(scrollregion=bbox)
+        if reset_position:
+            self.preview_canvas.xview_moveto(0)
+            self.preview_canvas.yview_moveto(0)
+
     def _clear_preview(self, message: str | None = None) -> None:
         if message is None:
             message = "Select a texture to preview"
         if hasattr(self.preview_label, "configure"):
             self.preview_label.configure(image="", text=message)
             self.preview_label.image = None
+        self._update_preview_scrollregion(reset_position=True)
         self.preview_image = None
         self.preview_source_image = None
         self._set_channel_controls_state("disabled")
@@ -830,6 +901,7 @@ class TextureManagerGUI:
         self.preview_label.configure(image=photo, text="")
         self.preview_label.image = photo
         self.preview_image = photo
+        self._update_preview_scrollregion()
 
     def _on_entry_selected(self, _event: object) -> None:
         if self.archive_bytes is None or not self.entries:
@@ -892,6 +964,7 @@ class TextureManagerGUI:
         self.preview_label.configure(image=photo, text="")
         self.preview_label.image = photo
         self.preview_image = photo
+        self._update_preview_scrollregion(reset_position=True)
         format_display = format_hint or detected_format or "unknown"
         self._set_status(f"Previewing {entry['relative_path']} ({format_display})")
         self._update_channel_preview()
