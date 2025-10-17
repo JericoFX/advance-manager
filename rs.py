@@ -57,12 +57,22 @@ except Exception:  # pragma: no cover - Tkinter availability is platform specifi
 Image = None
 ImageTk = None
 UnidentifiedImageError = Exception
+PIL_AVAILABLE = False
+PIL_IMAGETK_AVAILABLE = False
 try:  # pragma: no cover - Pillow availability depends on the environment.
-    from PIL import Image, ImageTk, UnidentifiedImageError
+    from PIL import Image, UnidentifiedImageError
 
     PIL_AVAILABLE = True
 except Exception:  # pragma: no cover - Pillow availability depends on the environment.
-    PIL_AVAILABLE = False
+    pass
+
+if PIL_AVAILABLE:
+    try:  # pragma: no cover - ImageTk availability depends on the environment.
+        from PIL import ImageTk
+
+        PIL_IMAGETK_AVAILABLE = True
+    except Exception:  # pragma: no cover - ImageTk availability depends on the environment.
+        pass
 
 ASURA_MAGIC = b"Asura   "
 ASURA_ZLB_MAGIC = b"AsuraZlb"
@@ -777,6 +787,13 @@ class TextureManagerGUI:
             self._clear_preview("Pillow is not installed; preview unavailable")
             self._set_status(
                 "Preview unavailable: install Pillow to enable texture previews"
+            )
+            return
+
+        if not PIL_IMAGETK_AVAILABLE:
+            self._clear_preview("Install Pillow's ImageTk support to preview textures")
+            self._set_status(
+                "Preview unavailable: install pillow[tk] or python3-tk for ImageTk"
             )
             return
 
