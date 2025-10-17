@@ -35,12 +35,13 @@ from __future__ import annotations
 import argparse
 import io
 import json
+import mmap
 import os
 import shutil
 import struct
 import zlib
 from pathlib import Path
-from typing import Dict, Iterable, List, Tuple
+from typing import Dict, Iterable, List, Sequence, Tuple
 
 tk = None
 filedialog = None
@@ -81,6 +82,9 @@ CHUNK_HEADER = struct.Struct("<4sIII")
 RSFL_ENTRY_STRUCT = struct.Struct("<III")
 RSFL_CHUNK_HEADER = struct.Struct("<5I")  # magic, size_with_header, type, type2, count
 
+# Files above this size will be memory-mapped instead of fully loaded into RAM.
+MEMORY_MAP_THRESHOLD = int(os.environ.get("RS_MEMORY_MAP_THRESHOLD", 256 * 1024 * 1024))
+
 IMAGE_EXTENSIONS = {
     ".bmp",
     ".dds",
@@ -105,7 +109,9 @@ def normalize_relative_path(name: str) -> str:
     return normalised.lstrip("/")
 
 
-def _unwrap_asura_container(data: bytes) -> Tuple[bytes, Dict[str, object]]:
+def _unwrap_asura_container(
+    data: bytes | mmap.mmap,
+) -> Tuple[bytes | mmap.mmap, Dict[str, object]]:
     """Return the raw Asura archive payload and compression metadata."""
 
     if data.startswith(ASURA_MAGIC):
@@ -464,13 +470,44 @@ def _normalise_entries(
     return normalised
 
 
+def _read_archive_bytes(path: Path) -> bytes | mmap.mmap:
+    """Return the bytes for ``path`` using a memory map when appropriate."""
+
+    try:
+        size = path.stat().st_size
+    except OSError as exc:  # pragma: no cover - filesystem dependent
+        raise RSFLParsingError(f"unable to stat archive: {exc}") from exc
+
+    if size >= max(0, MEMORY_MAP_THRESHOLD):
+        fd = os.open(path, os.O_RDONLY)
+        try:
+            return mmap.mmap(fd, length=0, access=mmap.ACCESS_READ)
+        finally:
+            os.close(fd)
+
+    return path.read_bytes()
+
+
+def _release_archive_buffer(buffer: object) -> None:
+    """Release buffers that expose a ``close`` method (e.g. memory maps)."""
+
+    close = getattr(buffer, "close", None)
+    if callable(close):
+        try:
+            close()
+        except Exception:  # pragma: no cover - best-effort cleanup
+            pass
+
+
 def load_archive(
     archive_path: Path,
-) -> Tuple[bytes, Dict[str, object], List[Dict[str, object]], Dict[str, object]]:
+) -> Tuple[bytes | mmap.mmap, Dict[str, object], List[Dict[str, object]], Dict[str, object]]:
     """Read an Asura archive and return its bytes, metadata and entries."""
 
-    original_bytes = archive_path.read_bytes()
+    original_bytes = _read_archive_bytes(archive_path)
     data, wrapper = _unwrap_asura_container(original_bytes)
+    if data is not original_bytes:
+        _release_archive_buffer(original_bytes)
     layout_info = _scan_for_rsfl(data)
 
     layout = layout_info.get("layout")
@@ -537,37 +574,40 @@ def extract_archive(archive_path: Path, output_dir: Path) -> Path:
 
     data, rsfl_info, entries, wrapper = load_archive(archive_path)
 
-    archive_name = archive_path.name
-    output_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        archive_name = archive_path.name
+        output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Dump all files controlled by the RSFL table.
-    extracted_files: List[Dict[str, object]] = []
-    for entry in entries:
-        payload = data[entry["offset"] : entry["offset"] + entry["size"]]
-        relative_path = entry["relative_path"]
-        relative_target = Path(*relative_path.split("/")) if relative_path else Path()
-        target_path = output_dir / relative_target
-        target_path.parent.mkdir(parents=True, exist_ok=True)
-        target_path.write_bytes(payload)
-        extracted_files.append(entry)
+        # Dump all files controlled by the RSFL table.
+        extracted_files: List[Dict[str, object]] = []
+        for entry in entries:
+            payload = data[entry["offset"] : entry["offset"] + entry["size"]]
+            relative_path = entry["relative_path"]
+            relative_target = Path(*relative_path.split("/")) if relative_path else Path()
+            target_path = output_dir / relative_target
+            target_path.parent.mkdir(parents=True, exist_ok=True)
+            target_path.write_bytes(payload)
+            extracted_files.append(entry)
 
-    manifest = {
-        "archive": archive_name,
-        "rsfl": rsfl_info,
-        "wrapper": wrapper,
-        "files": extracted_files,
-    }
+        manifest = {
+            "archive": archive_name,
+            "rsfl": rsfl_info,
+            "wrapper": wrapper,
+            "files": extracted_files,
+        }
 
-    manifest_path = output_dir / "manifest.json"
-    manifest_path.write_text(json.dumps(manifest, indent=2))
+        manifest_path = output_dir / "manifest.json"
+        manifest_path.write_text(json.dumps(manifest, indent=2))
 
-    # Store pristine copy of the archive next to the extraction to simplify repacking.
-    shutil.copy2(archive_path, output_dir / archive_name)
-    return manifest_path
+        # Store pristine copy of the archive next to the extraction to simplify repacking.
+        shutil.copy2(archive_path, output_dir / archive_name)
+        return manifest_path
+    finally:
+        _release_archive_buffer(data)
 
 
 def _apply_replacements(
-    archive_bytes: bytes,
+    archive_bytes: bytes | mmap.mmap,
     entries: List[Dict[str, object]],
     replacements: Dict[str, bytes],
 ) -> Tuple[bytearray, List[Dict[str, object]]]:
@@ -645,33 +685,36 @@ def repack_archive(original_archive: Path, manifest_path: Path, modified_dir: Pa
         raise RSFLParsingError("manifest does not contain any file entries")
 
     archive_bytes, _rsfl_info, entries, wrapper = load_archive(original_archive)
-    manifest_wrapper = manifest.get("wrapper") or {"kind": "raw"}
-    if manifest_wrapper.get("kind") != wrapper.get("kind"):
-        raise RSFLParsingError(
-            "manifest was generated from an archive with a different compression wrapper"
-        )
-    manifest_index = {entry["relative_path"]: entry for entry in files_info}
+    try:
+        manifest_wrapper = manifest.get("wrapper") or {"kind": "raw"}
+        if manifest_wrapper.get("kind") != wrapper.get("kind"):
+            raise RSFLParsingError(
+                "manifest was generated from an archive with a different compression wrapper"
+            )
+        manifest_index = {entry["relative_path"]: entry for entry in files_info}
 
-    replacements: Dict[str, bytes] = {}
-    for entry in entries:
-        rel_path = entry["relative_path"]
-        manifest_entry = manifest_index.get(rel_path)
-        if manifest_entry is None:
-            # Ignore files that were not part of the extraction.
-            continue
-        payload_path = modified_dir / rel_path
-        if not payload_path.exists():
-            continue
-        replacements[rel_path] = payload_path.read_bytes()
+        replacements: Dict[str, bytes] = {}
+        for entry in entries:
+            rel_path = entry["relative_path"]
+            manifest_entry = manifest_index.get(rel_path)
+            if manifest_entry is None:
+                # Ignore files that were not part of the extraction.
+                continue
+            payload_path = modified_dir / rel_path
+            if not payload_path.exists():
+                continue
+            replacements[rel_path] = payload_path.read_bytes()
 
-    if not replacements:
-        raise RSFLParsingError("no modified files found in the provided directory")
+        if not replacements:
+            raise RSFLParsingError("no modified files found in the provided directory")
 
-    updated, _ = _apply_replacements(archive_bytes, entries, replacements)
-    wrapped = _wrap_asura_container(bytes(updated), wrapper)
+        updated, _ = _apply_replacements(archive_bytes, entries, replacements)
+        wrapped = _wrap_asura_container(bytes(updated), wrapper)
 
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_bytes(wrapped)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(wrapped)
+    finally:
+        _release_archive_buffer(archive_bytes)
 
 
 class TextureManagerGUI:
@@ -686,12 +729,13 @@ class TextureManagerGUI:
         self.root.geometry("720x480")
 
         self.archive_path: Path | None = None
-        self.archive_bytes: bytes | None = None
+        self.archive_bytes: bytes | mmap.mmap | None = None
         self.entries: List[Dict[str, object]] = []
         self.replacements: Dict[str, bytes] = {}
         self.wrapper_info: Dict[str, object] | None = None
 
         self._build_ui()
+        self.root.protocol("WM_DELETE_WINDOW", self._shutdown)
 
     # ------------------------------------------------------------------ UI --
     def _build_ui(self) -> None:
@@ -708,6 +752,8 @@ class TextureManagerGUI:
         self.listbox = tk.Listbox(list_frame, selectmode=tk.MULTIPLE)
         self.listbox.grid(row=0, column=0, sticky="nsew")
         self.listbox.bind("<<ListboxSelect>>", self._on_entry_selected)
+        self.listbox.bind("<ButtonRelease-1>", self._remember_last_active)
+        self.last_activated_index: int | None = None
 
         scrollbar = tk.Scrollbar(list_frame, orient=tk.VERTICAL, command=self.listbox.yview)
         scrollbar.grid(row=0, column=1, sticky="ns")
@@ -809,7 +855,7 @@ class TextureManagerGUI:
 
         button_frame = tk.Frame(self.root)
         button_frame.grid(row=1, column=0, columnspan=2, sticky="ew", padx=10, pady=8)
-        for i in range(4):
+        for i in range(5):
             button_frame.columnconfigure(i, weight=1)
 
         tk.Button(button_frame, text="Open Archive", command=self.open_archive).grid(
@@ -818,11 +864,14 @@ class TextureManagerGUI:
         tk.Button(button_frame, text="Export Selected", command=self.export_selected).grid(
             row=0, column=1, padx=4
         )
-        tk.Button(button_frame, text="Import Replacement", command=self.import_replacement).grid(
+        tk.Button(button_frame, text="Export All", command=self.export_all).grid(
             row=0, column=2, padx=4
         )
-        tk.Button(button_frame, text="Save Patched Archive", command=self.save_patched_archive).grid(
+        tk.Button(button_frame, text="Import Replacement", command=self.import_replacement).grid(
             row=0, column=3, padx=4
+        )
+        tk.Button(button_frame, text="Save Patched Archive", command=self.save_patched_archive).grid(
+            row=0, column=4, padx=4
         )
 
         self.status = tk.StringVar(value="Select an archive to begin")
@@ -841,6 +890,7 @@ class TextureManagerGUI:
                     display += f" → {replacement_size} bytes"
                 display += " *"
             self.listbox.insert(tk.END, display)
+        self.last_activated_index = None
 
     def _set_status(self, message: str) -> None:
         self.status.set(message)
@@ -866,6 +916,36 @@ class TextureManagerGUI:
         self.preview_image = None
         self.preview_source_image = None
         self._set_channel_controls_state("disabled")
+        self.last_activated_index = None
+
+    def _shutdown(self) -> None:
+        _release_archive_buffer(self.archive_bytes)
+        self.archive_bytes = None
+        self.root.destroy()
+
+    def _remember_last_active(self, event: object) -> None:
+        if not hasattr(event, "y"):
+            return
+        try:
+            index = self.listbox.nearest(event.y)
+        except tk.TclError:
+            return
+        if 0 <= index < self.listbox.size():
+            self.last_activated_index = index
+
+    def _export_entries(
+        self, destination_path: Path, entries: Sequence[Dict[str, object]]
+    ) -> int:
+        count = 0
+        for entry in entries:
+            payload = self.archive_bytes[entry["offset"] : entry["offset"] + entry["size"]]
+            relative_path = entry["relative_path"]
+            relative_target = Path(*relative_path.split("/")) if relative_path else Path()
+            target = destination_path / relative_target
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(payload)
+            count += 1
+        return count
 
     def _set_channel_controls_state(self, state: str) -> None:
         for button in self.channel_buttons.values():
@@ -927,7 +1007,17 @@ class TextureManagerGUI:
             )
             return
 
-        index = selection[-1]
+        index = self.last_activated_index
+        if index is None or index not in selection:
+            try:
+                active_index = self.listbox.index(tk.ACTIVE)
+            except tk.TclError:
+                active_index = None
+            if active_index in selection:
+                index = active_index
+            else:
+                index = selection[-1]
+        self.last_activated_index = index
         entry = self.entries[index]
         payload = self.archive_bytes[entry["offset"] : entry["offset"] + entry["size"]]
         if not payload:
@@ -981,6 +1071,8 @@ class TextureManagerGUI:
         if not filename:
             return
 
+        previous_buffer = self.archive_bytes
+
         try:
             data, _rsfl_info, entries, wrapper = load_archive(Path(filename))
         except Exception as exc:  # pragma: no cover - GUI path
@@ -994,6 +1086,7 @@ class TextureManagerGUI:
                 "The selected archive does not contain recognised image entries.",
             )
 
+        _release_archive_buffer(previous_buffer)
         self.archive_path = Path(filename)
         self.archive_bytes = data
         self.entries = image_entries
@@ -1020,17 +1113,24 @@ class TextureManagerGUI:
             return
 
         destination_path = Path(destination)
-        count = 0
-        for index in indices:
-            entry = self.entries[index]
-            payload = self.archive_bytes[entry["offset"] : entry["offset"] + entry["size"]]
-            relative_path = entry["relative_path"]
-            relative_target = Path(*relative_path.split("/")) if relative_path else Path()
-            target = destination_path / relative_target
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(payload)
-            count += 1
+        entries = [self.entries[index] for index in indices]
+        count = self._export_entries(destination_path, entries)
+        self._set_status(f"Exported {count} file(s) to {destination_path}")
 
+    def export_all(self) -> None:
+        if self.archive_bytes is None:
+            messagebox.showwarning("No archive", "Open an archive before exporting.")
+            return
+        if not self.entries:
+            messagebox.showinfo("No entries", "Open an archive with textures before exporting.")
+            return
+
+        destination = filedialog.askdirectory(title="Select export directory")
+        if not destination:
+            return
+
+        destination_path = Path(destination)
+        count = self._export_entries(destination_path, self.entries)
         self._set_status(f"Exported {count} file(s) to {destination_path}")
 
     def import_replacement(self) -> None:
@@ -1089,9 +1189,11 @@ class TextureManagerGUI:
         if not filename:
             return
 
+        previous_buffer = self.archive_bytes
+
         try:
             updated, updated_entries = _apply_replacements(
-                self.archive_bytes, self.entries, self.replacements
+                previous_buffer, self.entries, self.replacements
             )
         except Exception as exc:  # pragma: no cover - GUI path
             messagebox.showerror("Unable to apply replacements", str(exc))
@@ -1102,6 +1204,7 @@ class TextureManagerGUI:
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_bytes(wrapped)
 
+        _release_archive_buffer(previous_buffer)
         self.archive_bytes = bytes(updated)
         self.entries = updated_entries
         self.replacements.clear()
