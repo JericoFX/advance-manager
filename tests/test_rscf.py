@@ -55,6 +55,27 @@ class RSCFExtractionTests(unittest.TestCase):
                     self.assertTrue(parent.exists(), f"missing directory {parent}")
                     self.assertTrue(parent.is_dir(), f"expected directory for {parent}")
 
+    def test_extract_wolf_mask_archive(self) -> None:
+        repo_root = Path(__file__).resolve().parent.parent
+        archive_path = repo_root / "WolfMask_Dark_Red.en"
+        self.assertTrue(archive_path.exists(), "fixture archive is missing")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_dir = Path(tmpdir)
+            manifest_path = extract_archive(archive_path, output_dir)
+            self.assertTrue(manifest_path.exists())
+
+            manifest = json.loads(manifest_path.read_text())
+            files = {entry["relative_path"]: entry for entry in manifest.get("files", [])}
+
+            expected_path = "graphics/characters/predator/wolfmask_col.tga"
+            self.assertIn(expected_path, files)
+
+            entry = files[expected_path]
+            extracted = output_dir / Path(*expected_path.split("/"))
+            self.assertTrue(extracted.exists(), f"missing extracted file {expected_path}")
+            self.assertEqual(extracted.stat().st_size, entry["size"])
+
 
 if __name__ == "__main__":
     unittest.main()

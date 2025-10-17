@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Utility helpers for extracting and repacking Asura RSFL archives.
+"""Utility helpers for extracting and repacking Asura RS managed archives.
 
 The original RSFL_ASR.cpp tool published by Trololp/Vhetration only supported
 extracting data from an RSFL chunk.  This script extends that behaviour so the
@@ -18,17 +18,16 @@ resource referenced by the RSFL table into ``<output_dir>``.  In addition it
 creates ``manifest.json`` which records the offsets and sizes of all entries as
 they appear in the archive.  The manifest is later consumed by *repack*.
 
-The *repack* command keeps the layout of the original archive intact.  It
-produces an updated copy where each entry listed in ``manifest.json`` is
-replaced by the corresponding file located inside ``<input_dir>``.  Repacking is
-safe as long as the modified files keep their original size – that is the
-requirement imposed by the RSFL table because changing the size would break the
-offset map for the rest of the archive.
+The *repack* command keeps the layout of the original archive intact.  RSFL
+entries can grow or shrink in size – the script appends resized payloads to the
+end of the archive and updates the offset table accordingly.  RSCF controlled
+entries must preserve their original size because their payload is embedded
+inside fixed-width chunks whose headers would otherwise need to be rewritten.
 
 While this script is intentionally conservative it enables a fast edit cycle:
 extract ➜ tweak asset ➜ repack.  The RSFL manifest contains enough contextual
-information so that a future enhancement could also grow/shrink assets and
-rebuild the RSFL table from scratch.
+information so that a future enhancement could also rebuild the RSCF chunk
+headers when supporting payloads that change size.
 """
 
 from __future__ import annotations
@@ -349,15 +348,39 @@ def _parse_rscf_entries(data: bytes, chunk_info: Dict[str, object]) -> List[Dict
     data_offset = int(header.get("data_offset", 0))
     data_span = int(header.get("data_span", 0))
 
-    cursor = header_offset + 12
-    name, consumed = _read_padded_string(data, cursor)
-    cursor += consumed + data_offset
+    string_offset = header_offset + 12
+    name, consumed = _read_padded_string(data, string_offset)
+    string_end = string_offset + consumed
 
-    payload_offset = cursor
-    payload_end = payload_offset + data_span
     chunk_end = chunk_offset + chunk_size
 
-    if payload_end > chunk_end or payload_end > len(data):
+    candidate_offsets: List[int] = []
+
+    def _register_candidate(value: int) -> None:
+        if value not in candidate_offsets:
+            candidate_offsets.append(value)
+
+    _register_candidate(string_end + data_offset)
+
+    masked_offset = data_offset & 0x00FFFFFF
+    if masked_offset != data_offset:
+        _register_candidate(string_end + masked_offset)
+
+    _register_candidate(chunk_end - data_span)
+
+    payload_offset = None
+    payload_end = None
+    for candidate in candidate_offsets:
+        if candidate < string_end:
+            continue
+        end = candidate + data_span
+        if end > chunk_end or end > len(data):
+            continue
+        payload_offset = candidate
+        payload_end = end
+        break
+
+    if payload_offset is None or payload_end is None:
         raise RSFLParsingError("RSCF payload exceeds chunk bounds")
 
     relative_name = normalize_relative_path(name)
