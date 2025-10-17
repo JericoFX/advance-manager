@@ -40,7 +40,7 @@ import shutil
 import struct
 import zlib
 from pathlib import Path
-from typing import Dict, Iterable, List, Tuple
+from typing import Dict, Iterable, List, Sequence, Tuple
 
 tk = None
 filedialog = None
@@ -708,6 +708,8 @@ class TextureManagerGUI:
         self.listbox = tk.Listbox(list_frame, selectmode=tk.MULTIPLE)
         self.listbox.grid(row=0, column=0, sticky="nsew")
         self.listbox.bind("<<ListboxSelect>>", self._on_entry_selected)
+        self.listbox.bind("<ButtonRelease-1>", self._remember_last_active)
+        self.last_activated_index: int | None = None
 
         scrollbar = tk.Scrollbar(list_frame, orient=tk.VERTICAL, command=self.listbox.yview)
         scrollbar.grid(row=0, column=1, sticky="ns")
@@ -809,7 +811,7 @@ class TextureManagerGUI:
 
         button_frame = tk.Frame(self.root)
         button_frame.grid(row=1, column=0, columnspan=2, sticky="ew", padx=10, pady=8)
-        for i in range(4):
+        for i in range(5):
             button_frame.columnconfigure(i, weight=1)
 
         tk.Button(button_frame, text="Open Archive", command=self.open_archive).grid(
@@ -818,11 +820,14 @@ class TextureManagerGUI:
         tk.Button(button_frame, text="Export Selected", command=self.export_selected).grid(
             row=0, column=1, padx=4
         )
-        tk.Button(button_frame, text="Import Replacement", command=self.import_replacement).grid(
+        tk.Button(button_frame, text="Export All", command=self.export_all).grid(
             row=0, column=2, padx=4
         )
-        tk.Button(button_frame, text="Save Patched Archive", command=self.save_patched_archive).grid(
+        tk.Button(button_frame, text="Import Replacement", command=self.import_replacement).grid(
             row=0, column=3, padx=4
+        )
+        tk.Button(button_frame, text="Save Patched Archive", command=self.save_patched_archive).grid(
+            row=0, column=4, padx=4
         )
 
         self.status = tk.StringVar(value="Select an archive to begin")
@@ -841,6 +846,7 @@ class TextureManagerGUI:
                     display += f" → {replacement_size} bytes"
                 display += " *"
             self.listbox.insert(tk.END, display)
+        self.last_activated_index = None
 
     def _set_status(self, message: str) -> None:
         self.status.set(message)
@@ -866,6 +872,31 @@ class TextureManagerGUI:
         self.preview_image = None
         self.preview_source_image = None
         self._set_channel_controls_state("disabled")
+        self.last_activated_index = None
+
+    def _remember_last_active(self, event: object) -> None:
+        if not hasattr(event, "y"):
+            return
+        try:
+            index = self.listbox.nearest(event.y)
+        except tk.TclError:
+            return
+        if 0 <= index < self.listbox.size():
+            self.last_activated_index = index
+
+    def _export_entries(
+        self, destination_path: Path, entries: Sequence[Dict[str, object]]
+    ) -> int:
+        count = 0
+        for entry in entries:
+            payload = self.archive_bytes[entry["offset"] : entry["offset"] + entry["size"]]
+            relative_path = entry["relative_path"]
+            relative_target = Path(*relative_path.split("/")) if relative_path else Path()
+            target = destination_path / relative_target
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(payload)
+            count += 1
+        return count
 
     def _set_channel_controls_state(self, state: str) -> None:
         for button in self.channel_buttons.values():
@@ -927,7 +958,17 @@ class TextureManagerGUI:
             )
             return
 
-        index = selection[-1]
+        index = self.last_activated_index
+        if index is None or index not in selection:
+            try:
+                active_index = self.listbox.index(tk.ACTIVE)
+            except tk.TclError:
+                active_index = None
+            if active_index in selection:
+                index = active_index
+            else:
+                index = selection[-1]
+        self.last_activated_index = index
         entry = self.entries[index]
         payload = self.archive_bytes[entry["offset"] : entry["offset"] + entry["size"]]
         if not payload:
@@ -1020,17 +1061,24 @@ class TextureManagerGUI:
             return
 
         destination_path = Path(destination)
-        count = 0
-        for index in indices:
-            entry = self.entries[index]
-            payload = self.archive_bytes[entry["offset"] : entry["offset"] + entry["size"]]
-            relative_path = entry["relative_path"]
-            relative_target = Path(*relative_path.split("/")) if relative_path else Path()
-            target = destination_path / relative_target
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(payload)
-            count += 1
+        entries = [self.entries[index] for index in indices]
+        count = self._export_entries(destination_path, entries)
+        self._set_status(f"Exported {count} file(s) to {destination_path}")
 
+    def export_all(self) -> None:
+        if self.archive_bytes is None:
+            messagebox.showwarning("No archive", "Open an archive before exporting.")
+            return
+        if not self.entries:
+            messagebox.showinfo("No entries", "Open an archive with textures before exporting.")
+            return
+
+        destination = filedialog.askdirectory(title="Select export directory")
+        if not destination:
+            return
+
+        destination_path = Path(destination)
+        count = self._export_entries(destination_path, self.entries)
         self._set_status(f"Exported {count} file(s) to {destination_path}")
 
     def import_replacement(self) -> None:
