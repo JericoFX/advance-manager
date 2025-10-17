@@ -114,10 +114,10 @@ def _unwrap_asura_container(
 ) -> Tuple[bytes | mmap.mmap, Dict[str, object]]:
     """Return the raw Asura archive payload and compression metadata."""
 
-    if data.startswith(ASURA_MAGIC):
+    if data[: len(ASURA_MAGIC)] == ASURA_MAGIC:
         return data, {"kind": "raw"}
 
-    if data.startswith(ASURA_ZLB_MAGIC):
+    if data[: len(ASURA_ZLB_MAGIC)] == ASURA_ZLB_MAGIC:
         if len(data) < 20:
             raise RSFLParsingError("truncated AsuraZlb header")
 
@@ -139,7 +139,7 @@ def _unwrap_asura_container(
             "expected_size": expected_size,
         }
 
-    if data.startswith(ASURA_ZBB_MAGIC):
+    if data[: len(ASURA_ZBB_MAGIC)] == ASURA_ZBB_MAGIC:
         if len(data) < 16:
             raise RSFLParsingError("truncated AsuraZbb header")
 
@@ -479,7 +479,10 @@ def _read_archive_bytes(path: Path) -> bytes | mmap.mmap:
         raise RSFLParsingError(f"unable to stat archive: {exc}") from exc
 
     if size >= max(0, MEMORY_MAP_THRESHOLD):
-        fd = os.open(path, os.O_RDONLY)
+        flags = os.O_RDONLY
+        # Windows requires the O_BINARY flag to avoid implicit newline conversion.
+        flags |= getattr(os, "O_BINARY", 0)
+        fd = os.open(path, flags)
         try:
             return mmap.mmap(fd, length=0, access=mmap.ACCESS_READ)
         finally:
