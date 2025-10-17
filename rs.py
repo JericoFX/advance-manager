@@ -349,15 +349,39 @@ def _parse_rscf_entries(data: bytes, chunk_info: Dict[str, object]) -> List[Dict
     data_offset = int(header.get("data_offset", 0))
     data_span = int(header.get("data_span", 0))
 
-    cursor = header_offset + 12
-    name, consumed = _read_padded_string(data, cursor)
-    cursor += consumed + data_offset
+    string_offset = header_offset + 12
+    name, consumed = _read_padded_string(data, string_offset)
+    string_end = string_offset + consumed
 
-    payload_offset = cursor
-    payload_end = payload_offset + data_span
     chunk_end = chunk_offset + chunk_size
 
-    if payload_end > chunk_end or payload_end > len(data):
+    candidate_offsets: List[int] = []
+
+    def _register_candidate(value: int) -> None:
+        if value not in candidate_offsets:
+            candidate_offsets.append(value)
+
+    _register_candidate(string_end + data_offset)
+
+    masked_offset = data_offset & 0x00FFFFFF
+    if masked_offset != data_offset:
+        _register_candidate(string_end + masked_offset)
+
+    _register_candidate(chunk_end - data_span)
+
+    payload_offset = None
+    payload_end = None
+    for candidate in candidate_offsets:
+        if candidate < string_end:
+            continue
+        end = candidate + data_span
+        if end > chunk_end or end > len(data):
+            continue
+        payload_offset = candidate
+        payload_end = end
+        break
+
+    if payload_offset is None or payload_end is None:
         raise RSFLParsingError("RSCF payload exceeds chunk bounds")
 
     relative_name = normalize_relative_path(name)
