@@ -38,6 +38,7 @@ import json
 import os
 import shutil
 import struct
+import zlib
 from pathlib import Path
 from typing import Dict, Iterable, List, Tuple
 
@@ -54,6 +55,8 @@ except Exception:  # pragma: no cover - Tkinter availability is platform specifi
     TK_AVAILABLE = False
 
 ASURA_MAGIC = b"Asura   "
+ASURA_ZLB_MAGIC = b"AsuraZlb"
+ASURA_ZBB_MAGIC = b"AsuraZbb"
 CHUNK_HEADER = struct.Struct("<4sIII")
 RSFL_ENTRY_STRUCT = struct.Struct("<III")
 RSFL_CHUNK_HEADER = struct.Struct("<5I")  # magic, size_with_header, type, type2, count
@@ -73,6 +76,124 @@ IMAGE_EXTENSIONS = {
 
 class RSFLParsingError(RuntimeError):
     """Raised when the archive layout does not match expectations."""
+
+
+def _unwrap_asura_container(data: bytes) -> Tuple[bytes, Dict[str, object]]:
+    """Return the raw Asura archive payload and compression metadata."""
+
+    if data.startswith(ASURA_MAGIC):
+        return data, {"kind": "raw"}
+
+    if data.startswith(ASURA_ZLB_MAGIC):
+        if len(data) < 20:
+            raise RSFLParsingError("truncated AsuraZlb header")
+
+        unknown = struct.unpack_from("<I", data, 8)[0]
+        compressed_size = struct.unpack_from("<I", data, 12)[0]
+        expected_size = struct.unpack_from("<I", data, 16)[0]
+        payload = data[20:]
+        if compressed_size and compressed_size <= len(payload):
+            payload = payload[:compressed_size]
+        try:
+            uncompressed = zlib.decompress(payload)
+        except zlib.error as exc:  # pragma: no cover - depends on archive contents
+            raise RSFLParsingError(f"failed to decompress AsuraZlb archive: {exc}") from exc
+        if expected_size and len(uncompressed) != expected_size:
+            expected_size = len(uncompressed)
+        return uncompressed, {
+            "kind": "zlb",
+            "unknown": unknown,
+            "expected_size": expected_size,
+        }
+
+    if data.startswith(ASURA_ZBB_MAGIC):
+        if len(data) < 16:
+            raise RSFLParsingError("truncated AsuraZbb header")
+
+        total_compressed = struct.unpack_from("<I", data, 8)[0]
+        total_size = struct.unpack_from("<I", data, 12)[0]
+        cursor = 16
+        output = bytearray()
+        chunk_sizes: List[int] = []
+
+        while cursor + 8 <= len(data):
+            chunk_compressed = struct.unpack_from("<I", data, cursor)[0]
+            chunk_size = struct.unpack_from("<I", data, cursor + 4)[0]
+            cursor += 8
+            if chunk_compressed == 0:
+                break
+            chunk_payload = data[cursor : cursor + chunk_compressed]
+            if len(chunk_payload) != chunk_compressed:
+                raise RSFLParsingError("truncated AsuraZbb chunk payload")
+            cursor += chunk_compressed
+            try:
+                chunk_data = zlib.decompress(chunk_payload)
+            except zlib.error as exc:  # pragma: no cover - depends on archive contents
+                raise RSFLParsingError(f"failed to decompress AsuraZbb chunk: {exc}") from exc
+            if chunk_size and len(chunk_data) != chunk_size:
+                raise RSFLParsingError(
+                    "decompressed chunk size does not match the value stored in the header"
+                )
+            output.extend(chunk_data)
+            chunk_sizes.append(len(chunk_data))
+            if total_size and len(output) >= total_size:
+                break
+
+        if total_size and len(output) != total_size:
+            total_size = len(output)
+
+        return bytes(output), {
+            "kind": "zbb",
+            "chunk_sizes": chunk_sizes,
+            "total_size": total_size,
+        }
+
+    raise RSFLParsingError(
+        "unsupported Asura container wrapper; try running the QuickBMS script first"
+    )
+
+
+def _wrap_asura_container(data: bytes, wrapper: Dict[str, object]) -> bytes:
+    """Reapply the original Asura wrapper (if any) after patching."""
+
+    kind = wrapper.get("kind") if wrapper else "raw"
+    if kind == "raw":
+        return data
+
+    if kind == "zlb":
+        compressed = zlib.compress(data)
+        unknown = int(wrapper.get("unknown", 0))
+        header = struct.pack(
+            "<8sIII", ASURA_ZLB_MAGIC, unknown, len(compressed), len(data)
+        )
+        return header + compressed
+
+    if kind == "zbb":
+        chunk_sizes = list(wrapper.get("chunk_sizes") or [])
+        if not chunk_sizes:
+            chunk_sizes = [len(data)]
+        payload = bytearray()
+        total_compressed = 0
+        cursor = 0
+        size_index = 0
+        default_size = chunk_sizes[-1]
+        while cursor < len(data):
+            size_hint = chunk_sizes[size_index] if size_index < len(chunk_sizes) else default_size
+            if size_hint <= 0:
+                size_hint = default_size or len(data)
+            end = min(len(data), cursor + size_hint)
+            chunk = data[cursor:end]
+            compressed_chunk = zlib.compress(chunk)
+            payload.extend(struct.pack("<II", len(compressed_chunk), len(chunk)))
+            payload.extend(compressed_chunk)
+            total_compressed += len(compressed_chunk)
+            cursor = end
+            size_index += 1
+
+        header = struct.pack("<8sII", ASURA_ZBB_MAGIC, total_compressed, len(data))
+        return header + payload
+
+    raise RSFLParsingError(f"unsupported wrapper kind: {kind}")
 
 
 def _read_padded_string(data: bytes, offset: int) -> Tuple[str, int]:
@@ -204,10 +325,13 @@ def _normalise_entries(
     return normalised
 
 
-def load_archive(archive_path: Path) -> Tuple[bytes, Dict[str, object], List[Dict[str, object]]]:
+def load_archive(
+    archive_path: Path,
+) -> Tuple[bytes, Dict[str, object], List[Dict[str, object]], Dict[str, object]]:
     """Read an Asura archive and return its bytes, RSFL metadata and entries."""
 
-    data = archive_path.read_bytes()
+    original_bytes = archive_path.read_bytes()
+    data, wrapper = _unwrap_asura_container(original_bytes)
     rsfl_offset, rsfl_chunk_size, rsfl_type1, rsfl_type2, entry_count = _scan_for_rsfl(data)
     entries_raw, table_end = _parse_rsfl_entries(data, rsfl_offset, rsfl_chunk_size, entry_count)
     entries = _normalise_entries(entries_raw, data, rsfl_offset, rsfl_chunk_size)
@@ -219,7 +343,7 @@ def load_archive(archive_path: Path) -> Tuple[bytes, Dict[str, object], List[Dic
         "type2": rsfl_type2,
         "table_end": table_end,
     }
-    return data, rsfl_info, entries
+    return data, rsfl_info, entries, wrapper
 
 
 def is_image_entry(entry_name: str) -> bool:
@@ -235,7 +359,7 @@ def extract_archive(archive_path: Path, output_dir: Path) -> Path:
     Returns the path to the generated manifest file.
     """
 
-    data, rsfl_info, entries = load_archive(archive_path)
+    data, rsfl_info, entries, wrapper = load_archive(archive_path)
 
     archive_name = archive_path.name
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -252,6 +376,7 @@ def extract_archive(archive_path: Path, output_dir: Path) -> Path:
     manifest = {
         "archive": archive_name,
         "rsfl": rsfl_info,
+        "wrapper": wrapper,
         "files": extracted_files,
     }
 
@@ -329,7 +454,12 @@ def repack_archive(original_archive: Path, manifest_path: Path, modified_dir: Pa
     if not files_info:
         raise RSFLParsingError("manifest does not contain any file entries")
 
-    archive_bytes, _rsfl_info, entries = load_archive(original_archive)
+    archive_bytes, _rsfl_info, entries, wrapper = load_archive(original_archive)
+    manifest_wrapper = manifest.get("wrapper") or {"kind": "raw"}
+    if manifest_wrapper.get("kind") != wrapper.get("kind"):
+        raise RSFLParsingError(
+            "manifest was generated from an archive with a different compression wrapper"
+        )
     manifest_index = {entry["relative_path"]: entry for entry in files_info}
 
     replacements: Dict[str, bytes] = {}
@@ -348,9 +478,10 @@ def repack_archive(original_archive: Path, manifest_path: Path, modified_dir: Pa
         raise RSFLParsingError("no modified files found in the provided directory")
 
     updated, _ = _apply_replacements(archive_bytes, entries, replacements)
+    wrapped = _wrap_asura_container(bytes(updated), wrapper)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_bytes(updated)
+    output_path.write_bytes(wrapped)
 
 
 class TextureManagerGUI:
@@ -368,6 +499,7 @@ class TextureManagerGUI:
         self.archive_bytes: bytes | None = None
         self.entries: List[Dict[str, object]] = []
         self.replacements: Dict[str, bytes] = {}
+        self.wrapper_info: Dict[str, object] | None = None
 
         self._build_ui()
 
@@ -440,7 +572,7 @@ class TextureManagerGUI:
             return
 
         try:
-            data, _rsfl_info, entries = load_archive(Path(filename))
+            data, _rsfl_info, entries, wrapper = load_archive(Path(filename))
         except Exception as exc:  # pragma: no cover - GUI path
             messagebox.showerror("Unable to open archive", str(exc))
             return
@@ -456,6 +588,7 @@ class TextureManagerGUI:
         self.archive_bytes = data
         self.entries = image_entries
         self.replacements.clear()
+        self.wrapper_info = wrapper
         self._refresh_list()
         self._set_status(
             f"Loaded {len(image_entries)} image entries from {self.archive_path.name}"
@@ -551,9 +684,10 @@ class TextureManagerGUI:
             messagebox.showerror("Unable to apply replacements", str(exc))
             return
 
+        wrapped = _wrap_asura_container(bytes(updated), self.wrapper_info or {"kind": "raw"})
         output_path = Path(filename)
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        output_path.write_bytes(updated)
+        output_path.write_bytes(wrapped)
 
         self.archive_bytes = bytes(updated)
         self.entries = updated_entries
