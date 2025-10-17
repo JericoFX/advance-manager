@@ -244,31 +244,17 @@ const FiveMCallbacks = {
                     this.loadMockData();
                     return;
                 }
-                
+
                 try {
                     const businessInfo = await BusinessAPI.getBusinessInfo();
-                    
+
                     if (businessInfo) {
-                        // Actualizar UI con datos reales
-                        $('#jobTitle span').text(businessInfo.job_name || 'Unknown Job');
-                        $('#businessName').text(businessInfo.name || 'Unknown Business');
-                        $('#businessFunds').text(`$${businessInfo.funds?.toLocaleString() || '0'}`);
-                        
-                        // Obtener empleados y actualizar contador
+                        this.applyBusinessData(businessInfo);
+
                         const employees = await BusinessAPI.getEmployees();
-                        $('#totalEmployees').text(employees?.length || '0');
-                        
-                        // Determinar rol del usuario
-                        const userRole = $('#userRole');
-                        if (businessInfo.is_boss) {
-                            userRole.find('.role-badge').addClass('boss').text('BOSS');
-                        } else {
-                            userRole.find('.role-badge').addClass('employee').text('EMPLOYEE');
-                        }
-                        
-                        // Actualizar nombre del usuario si está disponible
-                        if (businessInfo.user_name) {
-                            userRole.find('.user-name').text(businessInfo.user_name);
+
+                        if (Array.isArray(employees)) {
+                            this.updateEmployeeCount(employees.length);
                         }
                     }
                 } catch (error) {

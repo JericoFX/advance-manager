@@ -8,7 +8,12 @@ const BusinessManager = {
     
     init() {
         this.bindEvents();
-        this.showPanel(); // Para testing en navegador
+
+        const shouldAutoOpen = typeof FiveMCallbacks === 'undefined' || !FiveMCallbacks.isFiveM;
+
+        if (shouldAutoOpen) {
+            this.showPanel(); // Para testing en navegador
+        }
     },
     
     bindEvents() {
@@ -64,7 +69,14 @@ const BusinessManager = {
         this.isOpen = true;
         $('#overlay').addClass('active');
         $('#businessPanel').addClass('active');
-        
+
+        if (typeof FiveMCallbacks !== 'undefined' && FiveMCallbacks.isFiveM) {
+            if (typeof this.loadBusinessData === 'function') {
+                this.loadBusinessData();
+            }
+            return;
+        }
+
         // Simular datos para testing
         this.loadMockData();
     },
@@ -366,7 +378,12 @@ const BusinessManager = {
     },
     
     applyBusinessData(business = {}) {
-        const jobLabel = business.jobLabel || business.job_name || business.jobName || 'Business';
+        const jobLabel = business.jobLabel
+            || business.job_label
+            || (business.job && business.job.label)
+            || business.job_name
+            || business.jobName
+            || 'Business';
         $('#jobTitle span').text(jobLabel);
 
         if (business.name) {
@@ -390,13 +407,25 @@ const BusinessManager = {
             this.setSyncedEmployees(business.employees);
         }
 
+        if (typeof BusinessAPI !== 'undefined') {
+            const previousBusiness = BusinessAPI.currentBusiness || {};
+            BusinessAPI.currentBusiness = {
+                ...previousBusiness,
+                ...business,
+                employees: Array.isArray(employees) ? [...employees] : (previousBusiness.employees || [])
+            };
+        }
+
         this.updateEmployeeCount(Array.isArray(employees) ? employees.length : 0);
 
         const userRole = $('#userRole');
         const roleBadge = userRole.find('.role-badge');
         const userName = userRole.find('.user-name');
 
-        const roleFromData = (business.user && business.user.role) || business.role || (business.isBoss ? 'boss' : null);
+        const roleFromData = (business.user && business.user.role)
+            || business.role
+            || (business.metadata && business.metadata.role)
+            || (business.isBoss || business.is_boss || business.isboss ? 'boss' : null);
         const normalizedRole = roleFromData ? roleFromData.toString().toLowerCase() : null;
 
         roleBadge.removeClass('boss employee viewer');
@@ -413,6 +442,8 @@ const BusinessManager = {
             userName.text(business.user.name);
         } else if (business.userName) {
             userName.text(business.userName);
+        } else if (business.user_name) {
+            userName.text(business.user_name);
         }
     },
 
@@ -444,6 +475,10 @@ const BusinessManager = {
     },
 
     loadMockData() {
+        if (typeof FiveMCallbacks !== 'undefined' && FiveMCallbacks.isFiveM) {
+            return;
+        }
+
         if (typeof MockData !== 'undefined' && MockData.isActive) {
             const business = MockData.getBusiness();
             if (business) {
