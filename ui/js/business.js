@@ -86,27 +86,27 @@ const BusinessAPI = {
     },
     
     // Contratar empleado
-    hireEmployee(playerId, grade) {
+    hireEmployee(playerId, grade, wage) {
         return new Promise((resolve, reject) => {
             setTimeout(() => {
                 // Simular verificación de jugador
                 const playerNames = ['Mike Wilson', 'Sarah Connor', 'Tom Hardy', 'Emma Stone'];
                 const randomName = playerNames[Math.floor(Math.random() * playerNames.length)];
-                
+
                 if (!playerId || playerId <= 0) {
                     reject({ error: 'Invalid player ID' });
                     return;
                 }
-                
+
                 if (grade < 0 || grade > 4) {
                     reject({ error: 'Invalid grade level' });
                     return;
                 }
-                
+
                 // Simular wage según el grade (esto vendría del servidor)
                 const wagesByGrade = [25, 35, 45, 55, 75]; // Ejemplo de wages por grade
-                const assignedWage = wagesByGrade[grade];
-                
+                const assignedWage = Number.isFinite(wage) ? wage : wagesByGrade[grade];
+
                 const newEmployee = {
                     id: this.currentBusiness.employees.length + 1,
                     name: randomName,
@@ -131,11 +131,11 @@ const BusinessAPI = {
     },
     
     // Despedir empleado
-    fireEmployee(employeeId) {
+    fireEmployee(citizenId) {
         return new Promise((resolve, reject) => {
             setTimeout(() => {
-                const employeeIndex = this.currentBusiness.employees.findIndex(emp => emp.id === employeeId);
-                
+                const employeeIndex = this.currentBusiness.employees.findIndex(emp => emp.citizenid === citizenId);
+
                 if (employeeIndex === -1) {
                     reject({ error: 'Employee not found' });
                     return;
@@ -158,11 +158,11 @@ const BusinessAPI = {
     },
     
     // Actualizar salario de empleado
-    updateEmployeeWage(employeeId, newWage) {
+    updateEmployeeWage(citizenId, newWage) {
         return new Promise((resolve, reject) => {
             setTimeout(() => {
-                const employee = this.currentBusiness.employees.find(emp => emp.id === employeeId);
-                
+                const employee = this.currentBusiness.employees.find(emp => emp.citizenid === citizenId);
+
                 if (!employee) {
                     reject({ error: 'Employee not found' });
                     return;
@@ -189,11 +189,11 @@ const BusinessAPI = {
     },
     
     // Actualizar grado de empleado
-    updateEmployeeGrade(employeeId, newGrade) {
+    updateEmployeeGrade(citizenId, newGrade, wage) {
         return new Promise((resolve, reject) => {
             setTimeout(() => {
-                const employee = this.currentBusiness.employees.find(emp => emp.id === employeeId);
-                
+                const employee = this.currentBusiness.employees.find(emp => emp.citizenid === citizenId);
+
                 if (!employee) {
                     reject({ error: 'Employee not found' });
                     return;
@@ -203,7 +203,7 @@ const BusinessAPI = {
                     reject({ error: 'Invalid grade level' });
                     return;
                 }
-                
+
                 employee.grade = newGrade;
 
                 if (typeof BusinessManager !== 'undefined' && typeof BusinessManager.setSyncedEmployees === 'function') {
@@ -241,11 +241,11 @@ const BusinessAPI = {
     // Obtener grados disponibles
     getGrades() {
         return [
-            { value: 0, label: 'Grade 0 - Cadet' },
-            { value: 1, label: 'Grade 1 - Officer' },
-            { value: 2, label: 'Grade 2 - Sergeant' },
-            { value: 3, label: 'Grade 3 - Lieutenant' },
-            { value: 4, label: 'Grade 4 - Captain' }
+            { value: 0, label: 'Grade 0 - Cadet', wage: 25 },
+            { value: 1, label: 'Grade 1 - Officer', wage: 35 },
+            { value: 2, label: 'Grade 2 - Sergeant', wage: 45 },
+            { value: 3, label: 'Grade 3 - Lieutenant', wage: 55 },
+            { value: 4, label: 'Grade 4 - Captain', wage: 75 }
         ];
     },
     
@@ -343,15 +343,27 @@ if (typeof BusinessManager !== 'undefined') {
         async handleHire() {
             const playerId = parseInt($('#playerId').val());
             const grade = parseInt($('#gradeLevel').val());
-            
+            const confirmButton = $('#modalConfirm');
+            let wage = Number(confirmButton.data('wage'));
+
+            if (!Number.isFinite(wage)) {
+                wage = this.getWageForGrade(grade);
+                confirmButton.data('wage', wage);
+            }
+
             if (!playerId) {
                 this.showToast('Please enter a player ID', 'error');
                 return;
             }
-            
+
+            if (!Number.isInteger(wage) || wage <= 0) {
+                this.showToast('Invalid wage amount', 'error');
+                return;
+            }
+
             try {
                 this.showLoading('Hiring employee...');
-                const result = await BusinessAPI.hireEmployee(playerId, grade);
+                const result = await BusinessAPI.hireEmployee(playerId, grade, wage);
                 this.hideLoading();
 
                 this.showToast(result.message, 'success');
@@ -372,7 +384,7 @@ if (typeof BusinessManager !== 'undefined') {
         async fireEmployee(id) {
             try {
                 this.showLoading('Firing employee...');
-                const result = await BusinessAPI.fireEmployee(id);
+                const result = await BusinessAPI.fireEmployee(citizenId);
                 this.hideLoading();
 
                 this.showToast(result.message, 'success');

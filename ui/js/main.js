@@ -85,6 +85,7 @@ const BusinessManager = {
     hideModal() {
         $('#modal').removeClass('active');
         this.currentAction = null;
+        $('#modalConfirm').removeData('wage');
     },
     
     showDepositModal() {
@@ -150,26 +151,39 @@ const BusinessManager = {
                     <option value="4">Grade 4 - Captain</option>
                 </select>
             </div>
-            <div class="input-group">
-                <label class="input-label">Hourly Wage</label>
-                <input type="text" class="input-field" id="hourlyWage" placeholder="Auto-assigned by grade" readonly style="opacity: 0.6; cursor: not-allowed;">
-                <p style="color: var(--text-muted); font-size: 0.75rem; margin-top: 0.25rem;">Wage is automatically set based on grade from QBCore shared</p>
-            </div>
+                <div class="input-group">
+                    <label class="input-label">Hourly Wage</label>
+                    <input type="number" class="input-field" id="hourlyWage" placeholder="Auto-assigned by grade" readonly style="opacity: 0.6; cursor: not-allowed;">
+                    <p style="color: var(--text-muted); font-size: 0.75rem; margin-top: 0.25rem;">Wage is automatically set based on grade from QBCore shared</p>
+                </div>
         `;
         this.showModal('Hire Employee', body, 'Hire');
         this.currentAction = 'hire';
-        
+
         // Bind eventos para los botones
         setTimeout(() => {
             $('#nearestPlayerBtn').on('click', () => {
                 this.getNearestPlayer();
             });
-            
+
             $('#manualPlayerBtn').on('click', () => {
                 $('#playerId').focus();
             });
-            
+
             $('#playerId').focus();
+
+            const updateWageDisplay = () => {
+                const grade = parseInt($('#gradeLevel').val(), 10);
+                const wage = typeof this.getWageForGrade === 'function' ? this.getWageForGrade(grade) : null;
+
+                if (Number.isFinite(wage)) {
+                    $('#hourlyWage').val(wage).data('wage', wage);
+                    $('#modalConfirm').data('wage', wage);
+                }
+            };
+
+            $('#gradeLevel').on('change', updateWageDisplay);
+            updateWageDisplay();
         }, 100);
     },
     
