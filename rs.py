@@ -479,7 +479,10 @@ def _read_archive_bytes(path: Path) -> bytes | mmap.mmap:
         raise RSFLParsingError(f"unable to stat archive: {exc}") from exc
 
     if size >= max(0, MEMORY_MAP_THRESHOLD):
-        fd = os.open(path, os.O_RDONLY)
+        flags = os.O_RDONLY
+        # Windows requires the O_BINARY flag to avoid implicit newline conversion.
+        flags |= getattr(os, "O_BINARY", 0)
+        fd = os.open(path, flags)
         try:
             return mmap.mmap(fd, length=0, access=mmap.ACCESS_READ)
         finally:

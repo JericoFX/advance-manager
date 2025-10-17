@@ -145,3 +145,20 @@ EmployeeCache = {
     }
 }
 ```
+
+## RS Archive Utility Distribution
+
+The repository ships with `rs.py`, a standalone helper for extracting and repacking Asura RS archives. The script supports Windows, Linux, and macOS – on Windows the tool opens archives in binary mode so memory-mapped reads work without newline conversion.
+
+### Automated executables
+
+A GitHub Actions workflow (`package-rs.yml`) builds standalone binaries using PyInstaller for both Windows (`rs.exe`) and Linux (`rs`). Every push to `main` or a pull request run produces downloadable artifacts, and tagging a release with the pattern `v*` automatically creates a GitHub Release that bundles the packaged binaries for both platforms.
+
+If you prefer manual packaging, install PyInstaller locally and run:
+
+```bash
+python -m pip install pyinstaller
+pyinstaller --onefile rs.py
+```
+
+The resulting binary is placed under the `dist/` folder.
