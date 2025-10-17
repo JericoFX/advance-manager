@@ -34,6 +34,7 @@ rebuild the RSFL table from scratch.
 from __future__ import annotations
 
 import argparse
+import io
 import json
 import os
 import shutil
@@ -53,6 +54,16 @@ try:
     TK_AVAILABLE = True
 except Exception:  # pragma: no cover - Tkinter availability is platform specific.
     TK_AVAILABLE = False
+
+Image = None
+ImageTk = None
+UnidentifiedImageError = Exception
+try:  # pragma: no cover - Pillow availability depends on the environment.
+    from PIL import Image, ImageTk, UnidentifiedImageError
+
+    PIL_AVAILABLE = True
+except Exception:  # pragma: no cover - Pillow availability depends on the environment.
+    PIL_AVAILABLE = False
 
 ASURA_MAGIC = b"Asura   "
 ASURA_ZLB_MAGIC = b"AsuraZlb"
@@ -644,6 +655,7 @@ class TextureManagerGUI:
     def _build_ui(self) -> None:
         self.root.rowconfigure(0, weight=1)
         self.root.columnconfigure(0, weight=1)
+        self.root.columnconfigure(1, weight=1)
 
         list_frame = tk.Frame(self.root)
         list_frame.grid(row=0, column=0, sticky="nsew")
@@ -653,13 +665,28 @@ class TextureManagerGUI:
 
         self.listbox = tk.Listbox(list_frame, selectmode=tk.MULTIPLE)
         self.listbox.grid(row=0, column=0, sticky="nsew")
+        self.listbox.bind("<<ListboxSelect>>", self._on_entry_selected)
 
         scrollbar = tk.Scrollbar(list_frame, orient=tk.VERTICAL, command=self.listbox.yview)
         scrollbar.grid(row=0, column=1, sticky="ns")
         self.listbox.configure(yscrollcommand=scrollbar.set)
 
+        preview_frame = tk.Frame(self.root, borderwidth=1, relief=tk.SUNKEN)
+        preview_frame.grid(row=0, column=1, sticky="nsew", padx=(10, 10), pady=10)
+        preview_frame.rowconfigure(0, weight=1)
+        preview_frame.columnconfigure(0, weight=1)
+
+        self.preview_label = tk.Label(
+            preview_frame,
+            text="Select a texture to preview",
+            anchor="center",
+            justify="center",
+        )
+        self.preview_label.grid(row=0, column=0, sticky="nsew")
+        self.preview_image = None
+
         button_frame = tk.Frame(self.root)
-        button_frame.grid(row=1, column=0, sticky="ew", padx=10, pady=8)
+        button_frame.grid(row=1, column=0, columnspan=2, sticky="ew", padx=10, pady=8)
         for i in range(4):
             button_frame.columnconfigure(i, weight=1)
 
@@ -678,7 +705,7 @@ class TextureManagerGUI:
 
         self.status = tk.StringVar(value="Select an archive to begin")
         status_bar = tk.Label(self.root, textvariable=self.status, anchor="w")
-        status_bar.grid(row=2, column=0, sticky="ew", padx=10, pady=(0, 8))
+        status_bar.grid(row=2, column=0, columnspan=2, sticky="ew", padx=10, pady=(0, 8))
 
     # ------------------------------------------------------------- utilities --
     def _refresh_list(self) -> None:
@@ -695,6 +722,69 @@ class TextureManagerGUI:
 
     def _set_status(self, message: str) -> None:
         self.status.set(message)
+
+    def _clear_preview(self, message: str | None = None) -> None:
+        if message is None:
+            message = "Select a texture to preview"
+        if hasattr(self.preview_label, "configure"):
+            self.preview_label.configure(image="", text=message)
+            self.preview_label.image = None
+        self.preview_image = None
+
+    def _on_entry_selected(self, _event: object) -> None:
+        if self.archive_bytes is None or not self.entries:
+            self._clear_preview("Open an archive to preview textures")
+            return
+
+        selection = self.listbox.curselection()
+        if not selection:
+            self._clear_preview()
+            return
+
+        if not PIL_AVAILABLE:
+            self._clear_preview("Pillow is not installed; preview unavailable")
+            self._set_status(
+                "Preview unavailable: install Pillow to enable texture previews"
+            )
+            return
+
+        index = selection[-1]
+        entry = self.entries[index]
+        payload = self.archive_bytes[entry["offset"] : entry["offset"] + entry["size"]]
+        if not payload:
+            self._clear_preview("Empty payload; nothing to preview")
+            self._set_status(f"Entry {entry['relative_path']} has no data to preview")
+            return
+
+        format_hint = None
+        detected_format = None
+        try:
+            stream = io.BytesIO(payload)
+            if payload.startswith(b"DDS "):
+                format_hint = "DDS"
+            image = Image.open(stream)
+            image.load()
+            detected_format = image.format
+            image = image.convert("RGBA")
+            photo = ImageTk.PhotoImage(image)
+        except UnidentifiedImageError as exc:
+            self._clear_preview("Unsupported texture format")
+            self._set_status(
+                f"Unsupported texture format for {entry['relative_path']}: {exc}"
+            )
+            return
+        except Exception as exc:  # pragma: no cover - depends on payload contents
+            self._clear_preview("Unable to preview texture")
+            self._set_status(
+                f"Failed to render {entry['relative_path']}: {exc}".strip()
+            )
+            return
+
+        self.preview_label.configure(image=photo, text="")
+        self.preview_label.image = photo
+        self.preview_image = photo
+        format_display = format_hint or detected_format or "unknown"
+        self._set_status(f"Previewing {entry['relative_path']} ({format_display})")
 
     # ------------------------------------------------------------- callbacks --
     def open_archive(self) -> None:
@@ -727,6 +817,7 @@ class TextureManagerGUI:
         self.replacements.clear()
         self.wrapper_info = wrapper
         self._refresh_list()
+        self._clear_preview()
         self._set_status(
             f"Loaded {len(image_entries)} image entries from {self.archive_path.name}"
         )
