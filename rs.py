@@ -89,6 +89,13 @@ class RSFLParsingError(RuntimeError):
     """Raised when the archive layout does not match expectations."""
 
 
+def normalize_relative_path(name: str) -> str:
+    """Return a normalised relative path using forward slashes."""
+
+    normalised = name.replace("\\", "/")
+    return normalised.lstrip("/")
+
+
 def _unwrap_asura_container(data: bytes) -> Tuple[bytes, Dict[str, object]]:
     """Return the raw Asura archive payload and compression metadata."""
 
@@ -353,7 +360,7 @@ def _parse_rscf_entries(data: bytes, chunk_info: Dict[str, object]) -> List[Dict
     if payload_end > chunk_end or payload_end > len(data):
         raise RSFLParsingError("RSCF payload exceeds chunk bounds")
 
-    relative_name = name.lstrip("/\\")
+    relative_name = normalize_relative_path(name)
 
     entry = {
         "layout": "rscf",
@@ -398,7 +405,7 @@ def _normalise_entries(
         absolute_offset = _resolve_entry_offset(
             entry["raw_offset"], entry["size"], len(data), rsfl_offset, rsfl_chunk_size
         )
-        relative_name = entry["name"].lstrip("/\\")
+        relative_name = normalize_relative_path(entry["name"])
         chunk_end = rsfl_offset + rsfl_chunk_size
         offset_anchor = absolute_offset - entry["raw_offset"]
         normalised.append(
@@ -504,7 +511,9 @@ def extract_archive(archive_path: Path, output_dir: Path) -> Path:
     extracted_files: List[Dict[str, object]] = []
     for entry in entries:
         payload = data[entry["offset"] : entry["offset"] + entry["size"]]
-        target_path = output_dir / entry["relative_path"]
+        relative_path = entry["relative_path"]
+        relative_target = Path(*relative_path.split("/")) if relative_path else Path()
+        target_path = output_dir / relative_target
         target_path.parent.mkdir(parents=True, exist_ok=True)
         target_path.write_bytes(payload)
         extracted_files.append(entry)
@@ -841,7 +850,9 @@ class TextureManagerGUI:
         for index in indices:
             entry = self.entries[index]
             payload = self.archive_bytes[entry["offset"] : entry["offset"] + entry["size"]]
-            target = destination_path / entry["relative_path"]
+            relative_path = entry["relative_path"]
+            relative_target = Path(*relative_path.split("/")) if relative_path else Path()
+            target = destination_path / relative_target
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(payload)
             count += 1
