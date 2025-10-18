@@ -1490,7 +1490,8 @@ def launch_gui() -> None:
 
 def build_cli() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Extract and repack Asura RSFL archives")
-    subparsers = parser.add_subparsers(dest="command", required=True)
+    subparsers = parser.add_subparsers(dest="command")
+    parser.set_defaults(command="gui")
 
     extract_parser = subparsers.add_parser("extract", help="extract files and emit a manifest")
     extract_parser.add_argument(
