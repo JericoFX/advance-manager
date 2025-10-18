@@ -33,6 +33,7 @@ headers when supporting payloads that change size.
 from __future__ import annotations
 
 import argparse
+import copy
 import io
 import json
 import mmap
@@ -1363,10 +1364,11 @@ class TextureManagerGUI:
             return
 
         previous_buffer = self.archive_bytes
+        staged_entries = copy.deepcopy(self.entries)
 
         try:
             updated, updated_entries = _apply_replacements(
-                previous_buffer, self.entries, self.replacements
+                previous_buffer, staged_entries, self.replacements
             )
         except Exception as exc:  # pragma: no cover - GUI path
             messagebox.showerror("Unable to apply replacements", str(exc))
