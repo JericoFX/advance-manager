@@ -33,7 +33,6 @@ headers when supporting payloads that change size.
 from __future__ import annotations
 
 import argparse
-import copy
 import io
 import json
 import mmap
@@ -44,6 +43,8 @@ import threading
 import zlib
 from pathlib import Path
 from typing import Callable, Dict, Iterable, List, Sequence, Tuple
+
+import copy
 
 tk = None
 filedialog = None
@@ -811,6 +812,307 @@ def _apply_replacements(
     return updated, entries
 
 
+def _collect_replacement_payloads(
+    files_info: Sequence[Dict[str, object]],
+    modified_dir: Path,
+) -> Dict[str, bytes]:
+    """Return payloads for files that exist inside *modified_dir*."""
+
+    replacements: Dict[str, bytes] = {}
+    for manifest_entry in files_info:
+        rel_path = manifest_entry.get("relative_path")
+        if not isinstance(rel_path, str) or not rel_path:
+            continue
+
+        candidates: List[str] = []
+        exported_relative = manifest_entry.get("exported_path")
+        if isinstance(exported_relative, str) and exported_relative:
+            candidates.append(exported_relative)
+        candidates.append(rel_path)
+
+        payload_path: Path | None = None
+        for candidate in candidates:
+            candidate_path = modified_dir / Path(*candidate.split("/"))
+            if candidate_path.exists():
+                payload_path = candidate_path
+                break
+
+        if payload_path is None:
+            continue
+
+        replacements[rel_path] = payload_path.read_bytes()
+
+    return replacements
+
+
+def _extract_chunk_type_overrides(
+    layout_info: Dict[str, object],
+    archive_bytes: bytes | mmap.mmap | None,
+) -> Dict[int, Tuple[int, int]]:
+    """Return chunk header type overrides keyed by chunk offset."""
+
+    overrides: Dict[int, Tuple[int, int]] = {}
+    if not archive_bytes:
+        return overrides
+
+    layout = layout_info.get("layout")
+    if layout == "rscf":
+        for chunk in layout_info.get("chunks", []):
+            offset = int(chunk.get("offset", -1))
+            if offset < 0:
+                continue
+            try:
+                _magic, _size, type1, type2 = CHUNK_HEADER.unpack_from(archive_bytes, offset)
+            except struct.error:
+                continue
+            overrides[offset] = (type1, type2)
+    elif layout == "rsfl":
+        offset = int(layout_info.get("offset", -1))
+        if offset >= 0:
+            try:
+                _magic, _size, type1, type2 = CHUNK_HEADER.unpack_from(archive_bytes, offset)
+            except struct.error:
+                type1 = type2 = 0
+            overrides[offset] = (type1, type2)
+
+    return overrides
+
+
+def _encode_rscf_chunk(
+    *,
+    type1: int,
+    type2: int,
+    version: int,
+    data_offset: int,
+    name: str,
+    payload: bytes,
+) -> bytes:
+    """Return the bytes for a single RSCF chunk."""
+
+    try:
+        encoded_name = name.encode("utf-8")
+    except UnicodeEncodeError:
+        encoded_name = name.encode("latin-1", errors="replace")
+    encoded_name += b"\x00"
+    while len(encoded_name) % 4:
+        encoded_name += b"\x00"
+
+    rscf_header = struct.pack("<III", version & 0xFFFFFFFF, data_offset & 0xFFFFFFFF, len(payload))
+    chunk_body = bytearray()
+    chunk_body.extend(rscf_header)
+    chunk_body.extend(encoded_name)
+    chunk_body.extend(payload)
+
+    chunk_size = CHUNK_HEADER.size + len(chunk_body)
+    chunk_header = CHUNK_HEADER.pack(b"RSCF", chunk_size, type1 & 0xFFFFFFFF, type2 & 0xFFFFFFFF)
+    return chunk_header + bytes(chunk_body)
+
+
+def _build_rscf_patch(
+    layout_info: Dict[str, object],
+    patch_entries: Sequence[Tuple[Dict[str, object], bytes]],
+    chunk_type_overrides: Dict[int, Tuple[int, int]],
+) -> Tuple[bytes, List[str]]:
+    """Return a patch archive for RSCF controlled entries."""
+
+    archive = bytearray(ASURA_MAGIC)
+    chunk_map = {int(chunk.get("offset", -1)): chunk for chunk in layout_info.get("chunks", [])}
+    written: List[str] = []
+
+    for manifest_entry, payload in patch_entries:
+        rel_path = manifest_entry["relative_path"]
+        chunk_offset = int(manifest_entry.get("chunk_offset", -1))
+        chunk_details = chunk_map.get(chunk_offset) or {}
+        type1, type2 = chunk_type_overrides.get(chunk_offset, (0, 0))
+        if not type1 and not type2:
+            type1 = int(chunk_details.get("type1", 0))
+            type2 = int(chunk_details.get("type2", 0))
+
+        header = dict(chunk_details.get("header") or {})
+        version = int(manifest_entry.get("header_version", header.get("version", 0)))
+        data_offset = int(
+            manifest_entry.get("header_data_offset", header.get("data_offset", 0))
+        )
+        name = manifest_entry.get("name") or rel_path.replace("/", "\\")
+
+        archive.extend(
+            _encode_rscf_chunk(
+                type1=type1,
+                type2=type2,
+                version=version,
+                data_offset=data_offset,
+                name=name,
+                payload=payload,
+            )
+        )
+        written.append(rel_path)
+
+    return bytes(archive), written
+
+
+def _build_rsfl_patch(
+    layout_info: Dict[str, object],
+    patch_entries: Sequence[Tuple[Dict[str, object], bytes]],
+    chunk_type_overrides: Dict[int, Tuple[int, int]],
+) -> Tuple[bytes, List[str]]:
+    """Return a patch archive for RSFL controlled entries."""
+
+    if not patch_entries:
+        return b"", []
+
+    archive = bytearray(ASURA_MAGIC)
+    table = bytearray()
+    struct_offsets: List[int] = []
+    payload_offsets: List[int] = []
+    payload_area = bytearray()
+    written: List[str] = []
+
+    for manifest_entry, payload in patch_entries:
+        rel_path = manifest_entry["relative_path"]
+        name = manifest_entry.get("name") or rel_path.replace("/", "\\")
+        try:
+            encoded = name.encode("utf-8")
+        except UnicodeEncodeError:
+            encoded = name.encode("latin-1", errors="replace")
+        encoded += b"\x00"
+        while len(encoded) % 4:
+            encoded += b"\x00"
+        table.extend(encoded)
+        struct_offsets.append(len(table))
+        table.extend(b"\x00" * RSFL_ENTRY_STRUCT.size)
+
+        padding = (-len(payload_area)) % 4
+        if padding:
+            payload_area.extend(b"\x00" * padding)
+        payload_offsets.append(len(payload_area))
+        payload_area.extend(payload)
+        written.append(rel_path)
+
+    rsfl_type1 = int(layout_info.get("type1", 0))
+    rsfl_type2 = int(layout_info.get("type2", 0))
+    inner_size = RSFL_CHUNK_HEADER.size + len(table) + len(payload_area)
+    count = len(patch_entries)
+
+    # Populate RSFL entry structs now that we know the final layout.
+    for (manifest_entry, payload), struct_offset, payload_offset in zip(
+        patch_entries, struct_offsets, payload_offsets
+    ):
+        raw_offset = CHUNK_HEADER.size + RSFL_CHUNK_HEADER.size + len(table) + payload_offset
+        if raw_offset > 0xFFFFFFFF:
+            raise RSFLParsingError(
+                f"replacement for {manifest_entry['relative_path']} exceeds 32-bit offset capacity"
+            )
+        unk = int(manifest_entry.get("unk", 0)) & 0xFFFFFFFF
+        RSFL_ENTRY_STRUCT.pack_into(table, struct_offset, raw_offset, len(payload), unk)
+
+    chunk_body = bytearray()
+    chunk_body.extend(
+        RSFL_CHUNK_HEADER.pack(0x5246534C, inner_size, rsfl_type1 & 0xFFFFFFFF, rsfl_type2 & 0xFFFFFFFF, count)
+    )
+    chunk_body.extend(table)
+    chunk_body.extend(payload_area)
+
+    chunk_size = CHUNK_HEADER.size + len(chunk_body)
+    chunk_offset = int(layout_info.get("offset", 8))
+    type1, type2 = chunk_type_overrides.get(chunk_offset, (0, 0))
+    chunk_header = CHUNK_HEADER.pack(b"LFSR", chunk_size, type1 & 0xFFFFFFFF, type2 & 0xFFFFFFFF)
+
+    archive.extend(chunk_header)
+    archive.extend(chunk_body)
+    return bytes(archive), written
+
+
+def generate_patch_archive(
+    manifest: Dict[str, object],
+    replacements: Dict[str, bytes],
+    *,
+    archive_bytes: bytes | mmap.mmap | None = None,
+    original_entries: Sequence[Dict[str, object]] | None = None,
+) -> Tuple[bytes, List[str]]:
+    """Build a minimal Asura archive containing the provided replacements."""
+
+    files_info = manifest.get("files", [])
+    if not files_info:
+        raise RSFLParsingError("manifest does not contain any file entries")
+
+    layout_info = manifest.get("rsfl") or {}
+    layout_kind = layout_info.get("layout")
+    if layout_kind not in {"rsfl", "rscf"}:
+        raise RSFLParsingError("manifest does not describe a supported layout")
+
+    manifest_index = {entry.get("relative_path"): entry for entry in files_info}
+    entry_index = (
+        {entry.get("relative_path"): entry for entry in original_entries}
+        if original_entries
+        else {}
+    )
+
+    patch_entries: List[Tuple[Dict[str, object], bytes]] = []
+    for rel_path, payload in replacements.items():
+        manifest_entry = manifest_index.get(rel_path)
+        if manifest_entry is None:
+            continue
+
+        if original_entries is not None and archive_bytes is not None:
+            original_entry = entry_index.get(rel_path)
+            if original_entry is None:
+                continue
+            start = int(original_entry.get("offset", 0))
+            size = int(original_entry.get("size", 0))
+            original_payload = archive_bytes[start : start + size]
+            if payload == original_payload:
+                continue
+
+        patch_entries.append((manifest_entry, payload))
+
+    if not patch_entries:
+        raise RSFLParsingError("no modified files differ from the original archive")
+
+    overrides = _extract_chunk_type_overrides(layout_info, archive_bytes)
+
+    if layout_kind == "rscf":
+        return _build_rscf_patch(layout_info, patch_entries, overrides)
+    return _build_rsfl_patch(layout_info, patch_entries, overrides)
+
+
+def write_patch_archive(
+    original_archive: Path,
+    manifest_path: Path,
+    modified_dir: Path,
+    output_path: Path,
+) -> List[str]:
+    """Write a minimal patch archive for files modified in ``modified_dir``."""
+
+    manifest = json.loads(manifest_path.read_text())
+    if original_archive.name != manifest.get("archive"):
+        raise RSFLParsingError(
+            "original archive file name does not match manifest metadata"
+        )
+
+    files_info = manifest.get("files", [])
+    if not files_info:
+        raise RSFLParsingError("manifest does not contain any file entries")
+
+    archive_bytes, layout_info, entries, _wrapper = load_archive(original_archive)
+    try:
+        replacements = _collect_replacement_payloads(files_info, modified_dir)
+        if not replacements:
+            raise RSFLParsingError("no modified files found in the provided directory")
+
+        patch_bytes, written = generate_patch_archive(
+            {"rsfl": layout_info, "files": files_info, "archive": manifest.get("archive")},
+            replacements,
+            archive_bytes=archive_bytes,
+            original_entries=entries,
+        )
+
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(patch_bytes)
+        return written
+    finally:
+        _release_archive_buffer(archive_bytes)
+
+
 def repack_archive(original_archive: Path, manifest_path: Path, modified_dir: Path, output_path: Path) -> None:
     """Create a patched copy of the archive using files stored on disk."""
 
@@ -824,43 +1126,14 @@ def repack_archive(original_archive: Path, manifest_path: Path, modified_dir: Pa
     if not files_info:
         raise RSFLParsingError("manifest does not contain any file entries")
 
-    archive_bytes, _rsfl_info, entries, wrapper = load_archive(original_archive)
+    archive_bytes, layout_info, entries, wrapper = load_archive(original_archive)
     try:
         manifest_wrapper = manifest.get("wrapper") or {"kind": "raw"}
         if manifest_wrapper.get("kind") != wrapper.get("kind"):
             raise RSFLParsingError(
                 "manifest was generated from an archive with a different compression wrapper"
             )
-        manifest_index = {entry["relative_path"]: entry for entry in files_info}
-
-        replacements: Dict[str, bytes] = {}
-        for entry in entries:
-            rel_path = entry["relative_path"]
-            manifest_entry = manifest_index.get(rel_path)
-            if manifest_entry is None:
-                # Ignore files that were not part of the extraction.
-                continue
-
-            candidates: List[str] = []
-            exported_relative = manifest_entry.get("exported_path")
-            if isinstance(exported_relative, str) and exported_relative:
-                candidates.append(exported_relative)
-            candidates.append(rel_path)
-
-            payload_path: Path | None = None
-            for candidate in candidates:
-                candidate_path = (
-                    modified_dir / Path(*candidate.split("/")) if candidate else modified_dir
-                )
-                if candidate_path.exists():
-                    payload_path = candidate_path
-                    break
-
-            if payload_path is None:
-                continue
-
-            replacements[rel_path] = payload_path.read_bytes()
-
+        replacements = _collect_replacement_payloads(files_info, modified_dir)
         if not replacements:
             raise RSFLParsingError("no modified files found in the provided directory")
 
@@ -889,6 +1162,7 @@ class TextureManagerGUI:
         self.entries: List[Dict[str, object]] = []
         self.replacements: Dict[str, bytes] = {}
         self.wrapper_info: Dict[str, object] | None = None
+        self.layout_info: Dict[str, object] | None = None
 
         self._build_ui()
         self.root.protocol("WM_DELETE_WINDOW", self._shutdown)
@@ -1238,7 +1512,7 @@ class TextureManagerGUI:
         previous_buffer = self.archive_bytes
 
         try:
-            data, _rsfl_info, entries, wrapper = load_archive(Path(filename))
+            data, layout_info, entries, wrapper = load_archive(Path(filename))
         except Exception as exc:  # pragma: no cover - GUI path
             messagebox.showerror("Unable to open archive", str(exc))
             return
@@ -1256,6 +1530,7 @@ class TextureManagerGUI:
         self.entries = image_entries
         self.replacements.clear()
         self.wrapper_info = wrapper
+        self.layout_info = layout_info
         self._refresh_list()
         self._clear_preview()
         self._set_status(
@@ -1343,6 +1618,65 @@ class TextureManagerGUI:
             f"Queued replacement for {entry['relative_path']} ({len(payload)} bytes)"
         )
 
+    def _ask_patch_destination(self, archive_output: Path) -> Path | None:
+        """Return the destination path for an optional patch archive."""
+
+        if self.layout_info is None:
+            return None
+
+        default_patch = archive_output.with_suffix(archive_output.suffix + ".patch.asr")
+        try:
+            confirm = messagebox.askyesno(
+                "Create patch archive?",
+                "Would you like to generate a separate patch archive containing only the modified files?",
+            )
+        except tk.TclError:
+            confirm = False
+
+        if not confirm:
+            return None
+
+        filename = filedialog.asksaveasfilename(
+            title="Save patch archive",
+            defaultextension=".asr",
+            initialfile=default_patch.name,
+            filetypes=[
+                ("Asura archives", "*.asr *.pc *.es *.en *.fr *.de"),
+                ("All files", "*.*"),
+            ],
+        )
+        if not filename:
+            return None
+        return Path(filename)
+
+    def _create_patch_archive(
+        self, patch_path: Path, replacements: Dict[str, bytes]
+    ) -> List[str]:
+        """Write a patch archive reflecting *replacements* to *patch_path*."""
+
+        if self.archive_bytes is None or self.layout_info is None:
+            raise RSFLParsingError("open an archive before creating a patch")
+
+        manifest = {
+            "archive": self.archive_path.name if self.archive_path else "",
+            "rsfl": copy.deepcopy(self.layout_info),
+            "files": [copy.deepcopy(entry) for entry in self.entries],
+        }
+
+        patch_bytes, written = generate_patch_archive(
+            manifest,
+            replacements,
+            archive_bytes=self.archive_bytes,
+            original_entries=self.entries,
+        )
+
+        if not written:
+            raise RSFLParsingError("no replacements require a patch archive")
+
+        patch_path.parent.mkdir(parents=True, exist_ok=True)
+        patch_path.write_bytes(patch_bytes)
+        return written
+
     def save_patched_archive(self) -> None:
         if self.archive_bytes is None or self.archive_path is None:
             messagebox.showwarning("No archive", "Open an archive before saving.")
@@ -1365,6 +1699,7 @@ class TextureManagerGUI:
 
         previous_buffer = self.archive_bytes
         staged_entries = copy.deepcopy(self.entries)
+        pending_replacements = dict(self.replacements)
 
         try:
             updated, updated_entries = _apply_replacements(
@@ -1378,6 +1713,8 @@ class TextureManagerGUI:
         wrapped = _wrap_asura_container(new_archive_bytes, self.wrapper_info or {"kind": "raw"})
         output_path = Path(filename)
         output_path.parent.mkdir(parents=True, exist_ok=True)
+
+        patch_destination = self._ask_patch_destination(output_path)
 
         total_size = len(wrapped)
         maximum = max(total_size, 1)
@@ -1446,7 +1783,25 @@ class TextureManagerGUI:
                 self.entries = updated_entries
                 self.replacements.clear()
                 self._refresh_list()
-                self._set_status(f"Saved patched archive to {output_path}")
+                patch_note = ""
+                if patch_destination is not None:
+                    try:
+                        written = self._create_patch_archive(
+                            patch_destination, pending_replacements
+                        )
+                    except RSFLParsingError as exc:  # pragma: no cover - GUI path
+                        messagebox.showinfo("Patch archive not created", str(exc))
+                    except Exception as exc:  # pragma: no cover - GUI path
+                        messagebox.showerror(
+                            "Unable to create patch archive", str(exc)
+                        )
+                    else:
+                        patch_note = f"; patch saved to {patch_destination}"
+                        messagebox.showinfo(
+                            "Patch archive saved",
+                            f"Patch archive written to {patch_destination} ({len(written)} file(s))",
+                        )
+                self._set_status(f"Saved patched archive to {output_path}{patch_note}")
                 messagebox.showinfo(
                     "Archive saved", f"Patched archive written to {output_path}"
                 )
@@ -1507,6 +1862,19 @@ def build_cli() -> argparse.ArgumentParser:
     repack_parser.add_argument("input_dir", type=Path, help="directory containing the modified files")
     repack_parser.add_argument("output", type=Path, help="path of the repacked archive")
 
+    patch_parser = subparsers.add_parser(
+        "patch",
+        help="generate a minimal archive containing only modified files",
+    )
+    patch_parser.add_argument("archive", type=Path, help="original archive used during extraction")
+    patch_parser.add_argument(
+        "manifest", type=Path, help="manifest generated by the extract command"
+    )
+    patch_parser.add_argument(
+        "input_dir", type=Path, help="directory containing the modified files"
+    )
+    patch_parser.add_argument("output", type=Path, help="path of the patch archive")
+
     subparsers.add_parser("gui", help="launch a texture focused graphical interface")
 
     return parser
@@ -1522,6 +1890,11 @@ def main(argv: Iterable[str] | None = None) -> None:
     elif args.command == "repack":
         repack_archive(args.archive, args.manifest, args.input_dir, args.output)
         print(f"Repacked archive written to {args.output}")
+    elif args.command == "patch":
+        written = write_patch_archive(args.archive, args.manifest, args.input_dir, args.output)
+        print(
+            f"Patch archive written to {args.output} ({len(written)} file(s) included)"
+        )
     elif args.command == "gui":
         if not TK_AVAILABLE:
             raise SystemExit("Tkinter is not available on this platform; GUI mode is disabled.")
