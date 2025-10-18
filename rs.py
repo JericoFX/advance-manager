@@ -39,9 +39,10 @@ import mmap
 import os
 import shutil
 import struct
+import threading
 import zlib
 from pathlib import Path
-from typing import Dict, Iterable, List, Sequence, Tuple
+from typing import Callable, Dict, Iterable, List, Sequence, Tuple
 
 tk = None
 filedialog = None
@@ -49,7 +50,7 @@ messagebox = None
 try:
     # Tkinter is optional – only needed when launching the GUI helper.
     import tkinter as tk
-    from tkinter import filedialog, messagebox
+    from tkinter import filedialog, messagebox, ttk
 
     TK_AVAILABLE = True
 except Exception:  # pragma: no cover - Tkinter availability is platform specific.
@@ -237,6 +238,60 @@ def _wrap_asura_container(data: bytes, wrapper: Dict[str, object]) -> bytes:
         return header + payload
 
     raise RSFLParsingError(f"unsupported wrapper kind: {kind}")
+
+
+def _write_bytes_in_chunks(
+    path: Path,
+    data: bytes,
+    *,
+    chunk_size: int = 2 * 1024 * 1024,
+    cancel_event: threading.Event | None = None,
+    progress_callback: Callable[[int], None] | None = None,
+) -> Tuple[str, Exception | None]:
+    """Write *data* to *path* in chunks while reporting progress.
+
+    Returns a tuple ``(status, error)`` where *status* is ``"success"``,
+    ``"cancelled"``, or ``"error"``.  When an error occurs, *error* contains the
+    exception raised while attempting to write the file.
+    """
+
+    if chunk_size <= 0:
+        raise ValueError("chunk_size must be positive")
+
+    total = len(data)
+    written = 0
+    status = "success"
+
+    try:
+        with path.open("wb") as handle:
+            if total == 0 and progress_callback is not None:
+                progress_callback(0)
+
+            for start in range(0, total, chunk_size):
+                if cancel_event is not None and cancel_event.is_set():
+                    status = "cancelled"
+                    break
+
+                chunk = data[start : start + chunk_size]
+                handle.write(chunk)
+                written += len(chunk)
+                if progress_callback is not None:
+                    progress_callback(written)
+
+        if status != "success":
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                pass
+
+        return status, None
+
+    except Exception as exc:  # pragma: no cover - depends on filesystem errors.
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+        return "error", exc
 
 
 def _read_padded_string(data: bytes, offset: int) -> Tuple[str, int]:
@@ -1317,18 +1372,107 @@ class TextureManagerGUI:
             messagebox.showerror("Unable to apply replacements", str(exc))
             return
 
-        wrapped = _wrap_asura_container(bytes(updated), self.wrapper_info or {"kind": "raw"})
+        new_archive_bytes = bytes(updated)
+        wrapped = _wrap_asura_container(new_archive_bytes, self.wrapper_info or {"kind": "raw"})
         output_path = Path(filename)
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        output_path.write_bytes(wrapped)
 
-        _release_archive_buffer(previous_buffer)
-        self.archive_bytes = bytes(updated)
-        self.entries = updated_entries
-        self.replacements.clear()
-        self._refresh_list()
-        self._set_status(f"Saved patched archive to {output_path}")
-        messagebox.showinfo("Archive saved", f"Patched archive written to {output_path}")
+        total_size = len(wrapped)
+        maximum = max(total_size, 1)
+        self._set_status("Saving patched archive...")
+
+        progress_window = tk.Toplevel(self.root)
+        progress_window.title("Saving patched archive")
+        progress_window.transient(self.root)
+        progress_window.resizable(False, False)
+
+        progress_message = tk.StringVar(value="Preparing to save archive...")
+        tk.Label(progress_window, textvariable=progress_message).pack(
+            padx=20, pady=(15, 5)
+        )
+
+        progress_var = tk.DoubleVar(value=0)
+        progress_bar = ttk.Progressbar(
+            progress_window,
+            maximum=maximum,
+            variable=progress_var,
+            length=320,
+            mode="determinate",
+        )
+        progress_bar.pack(padx=20, pady=5, fill="x")
+
+        cancel_event = threading.Event()
+
+        def request_cancel() -> None:
+            if cancel_event.is_set():
+                return
+            cancel_event.set()
+            progress_message.set("Cancelling...")
+            try:
+                cancel_button.configure(state="disabled")
+            except tk.TclError:
+                pass
+
+        cancel_button = tk.Button(progress_window, text="Cancel", command=request_cancel)
+        cancel_button.pack(padx=20, pady=(5, 15))
+
+        progress_window.protocol("WM_DELETE_WINDOW", request_cancel)
+        progress_window.focus_set()
+        progress_window.grab_set()
+
+        def update_progress(written: int) -> None:
+            progress_var.set(min(written, maximum))
+            if total_size:
+                percent = min(100.0, (written / total_size) * 100)
+            else:
+                percent = 100.0
+            progress_message.set(f"Saving archive... {percent:.0f}%")
+
+        def finalize(status: str, error: Exception | None) -> None:
+            if status == "success":
+                update_progress(total_size)
+            if progress_window.winfo_exists():
+                try:
+                    progress_window.grab_release()
+                except tk.TclError:
+                    pass
+                progress_window.destroy()
+
+            if status == "success":
+                _release_archive_buffer(previous_buffer)
+                self.archive_bytes = new_archive_bytes
+                self.entries = updated_entries
+                self.replacements.clear()
+                self._refresh_list()
+                self._set_status(f"Saved patched archive to {output_path}")
+                messagebox.showinfo(
+                    "Archive saved", f"Patched archive written to {output_path}"
+                )
+            elif status == "cancelled":
+                self._set_status("Archive save cancelled")
+                messagebox.showinfo(
+                    "Save cancelled", "Archive save was cancelled before completion."
+                )
+            else:
+                self._set_status("Failed to save archive")
+                detail = str(error) if error else "Unknown error while saving archive."
+                messagebox.showerror("Unable to save archive", detail)
+
+        def report_progress(written: int) -> None:
+            self.root.after(0, update_progress, written)
+
+        def background_write() -> None:
+            status, error = _write_bytes_in_chunks(
+                output_path,
+                wrapped,
+                chunk_size=4 * 1024 * 1024,
+                cancel_event=cancel_event,
+                progress_callback=report_progress,
+            )
+            self.root.after(0, finalize, status, error)
+
+        thread = threading.Thread(target=background_write, daemon=True)
+        thread.start()
 
     # ----------------------------------------------------------------- public --
     def run(self) -> None:
