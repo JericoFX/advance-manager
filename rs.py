@@ -1457,7 +1457,11 @@ class TextureManagerGUI:
                 index = selection[-1]
         self.last_activated_index = index
         entry = self.entries[index]
-        payload = self.archive_bytes[entry["offset"] : entry["offset"] + entry["size"]]
+        replacement = self.replacements.get(entry["relative_path"])
+        if replacement is not None:
+            payload = replacement
+        else:
+            payload = self.archive_bytes[entry["offset"] : entry["offset"] + entry["size"]]
         if not payload:
             self._clear_preview("Empty payload; nothing to preview")
             self._set_status(f"Entry {entry['relative_path']} has no data to preview")
@@ -1595,7 +1599,8 @@ class TextureManagerGUI:
             )
             return
 
-        entry = self.entries[indices[0]]
+        entry_index = indices[0]
+        entry = self.entries[entry_index]
         filename = filedialog.askopenfilename(
             title="Select replacement texture",
             filetypes=[
@@ -1614,6 +1619,14 @@ class TextureManagerGUI:
 
         self.replacements[entry["relative_path"]] = payload
         self._refresh_list()
+        try:
+            self.listbox.selection_set(entry_index)
+            self.listbox.activate(entry_index)
+        except tk.TclError:
+            pass
+        else:
+            self.last_activated_index = entry_index
+            self._on_entry_selected(None)
         self._set_status(
             f"Queued replacement for {entry['relative_path']} ({len(payload)} bytes)"
         )
