@@ -1445,16 +1445,21 @@ class TextureManagerGUI:
             )
             return
 
-        index = self.last_activated_index
-        if index is None or index not in selection:
-            try:
-                active_index = self.listbox.index(tk.ACTIVE)
-            except tk.TclError:
-                active_index = None
-            if active_index in selection:
-                index = active_index
-            else:
-                index = selection[-1]
+        try:
+            active_index = self.listbox.index(tk.ACTIVE)
+        except tk.TclError:
+            active_index = None
+
+        if active_index in selection:
+            index = active_index
+        elif (
+            self.last_activated_index is not None
+            and self.last_activated_index in selection
+        ):
+            index = self.last_activated_index
+        else:
+            index = selection[-1]
+
         self.last_activated_index = index
         entry = self.entries[index]
         payload = self.archive_bytes[entry["offset"] : entry["offset"] + entry["size"]]
