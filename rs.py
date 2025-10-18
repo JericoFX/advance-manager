@@ -97,6 +97,16 @@ IMAGE_EXTENSIONS = {
     ".tiff",
 }
 
+MAGIC_TO_IMAGE_FORMAT = (
+    (b"DDS ", "DDS", ".dds"),
+    (b"\x89PNG\r\n\x1a\n", "PNG", ".png"),
+    (b"BM", "BMP", ".bmp"),
+    (b"GIF8", "GIF", ".gif"),
+    (b"\xff\xd8\xff", "JPEG", ".jpg"),
+    (b"II*\x00", "TIFF", ".tif"),
+    (b"MM\x00*", "TIFF", ".tif"),
+)
+
 
 class RSFLParsingError(RuntimeError):
     """Raised when the archive layout does not match expectations."""
@@ -569,6 +579,26 @@ def is_image_entry(entry_name: str) -> bool:
     return suffix in IMAGE_EXTENSIONS
 
 
+def detect_image_format(payload: bytes) -> Tuple[str | None, str | None]:
+    """Return a tuple of (format_name, extension) for recognised image payloads."""
+
+    for magic, format_name, extension in MAGIC_TO_IMAGE_FORMAT:
+        if payload.startswith(magic):
+            return format_name, extension
+    return None, None
+
+
+def resolve_export_relative_path(relative_path: str, payload: bytes) -> Tuple[str, str | None]:
+    """Return the preferred export path for ``relative_path`` based on ``payload``."""
+
+    original = Path(*relative_path.split("/")) if relative_path else Path()
+    _, extension = detect_image_format(payload)
+    if extension and original.suffix.lower() != extension:
+        adjusted = original.with_suffix(extension)
+        return str(adjusted.as_posix()), str(original.as_posix())
+    return str(original.as_posix()), None
+
+
 def extract_archive(archive_path: Path, output_dir: Path) -> Path:
     """Extract RSFL controlled files and write a manifest.
 
@@ -586,11 +616,20 @@ def extract_archive(archive_path: Path, output_dir: Path) -> Path:
         for entry in entries:
             payload = data[entry["offset"] : entry["offset"] + entry["size"]]
             relative_path = entry["relative_path"]
-            relative_target = Path(*relative_path.split("/")) if relative_path else Path()
+            export_relative, original_relative = resolve_export_relative_path(
+                relative_path, payload
+            )
+            relative_target = (
+                Path(*export_relative.split("/")) if export_relative else Path()
+            )
             target_path = output_dir / relative_target
             target_path.parent.mkdir(parents=True, exist_ok=True)
             target_path.write_bytes(payload)
-            extracted_files.append(entry)
+            entry_copy = dict(entry)
+            if original_relative is not None:
+                entry_copy["exported_path"] = export_relative
+                entry_copy["original_path"] = original_relative
+            extracted_files.append(entry_copy)
 
         manifest = {
             "archive": archive_name,
@@ -633,13 +672,55 @@ def _apply_replacements(
         layout = entry.get("layout", "rsfl")
 
         if layout == "rscf":
-            if new_size != entry["size"]:
+            chunk_offset = entry.get("chunk_offset")
+            header_offset = entry.get("header_offset")
+            if chunk_offset is None or header_offset is None:
                 raise RSFLParsingError(
-                    f"replacement for {rel_path} must preserve the original size in RSCF archives"
+                    f"replacement for {rel_path} is missing chunk metadata"
                 )
+
+            old_size = entry["size"]
+            delta = new_size - old_size
+
             updated[start:end] = payload
             entry["offset"] = start
             entry["size"] = new_size
+
+            struct.pack_into("<I", updated, header_offset + 8, new_size)
+            entry["header_data_span"] = new_size
+
+            if delta:
+                new_chunk_size = entry["chunk_size"] + delta
+                if new_chunk_size <= 0:
+                    raise RSFLParsingError(
+                        f"replacement for {rel_path} would shrink the RSCF chunk below zero bytes"
+                    )
+
+                struct.pack_into("<I", updated, chunk_offset + 4, new_chunk_size)
+                entry["chunk_size"] = new_chunk_size
+
+                for other in entries:
+                    if other is entry:
+                        continue
+                    if other.get("layout") != "rscf":
+                        continue
+                    other_chunk_offset = other.get("chunk_offset")
+                    if other_chunk_offset is None:
+                        continue
+                    if other_chunk_offset <= chunk_offset:
+                        continue
+
+                    other["chunk_offset"] = other_chunk_offset + delta
+                    other_offset = other.get("offset")
+                    if other_offset is not None:
+                        other["offset"] = other_offset + delta
+                    other_anchor = other.get("offset_anchor")
+                    if other_anchor is not None:
+                        other["offset_anchor"] = other_anchor + delta
+                    other_header_offset = other.get("header_offset")
+                    if other_header_offset is not None:
+                        other["header_offset"] = other_header_offset + delta
+
             continue
 
         if new_size == entry["size"]:
@@ -703,9 +784,25 @@ def repack_archive(original_archive: Path, manifest_path: Path, modified_dir: Pa
             if manifest_entry is None:
                 # Ignore files that were not part of the extraction.
                 continue
-            payload_path = modified_dir / rel_path
-            if not payload_path.exists():
+
+            candidates: List[str] = []
+            exported_relative = manifest_entry.get("exported_path")
+            if isinstance(exported_relative, str) and exported_relative:
+                candidates.append(exported_relative)
+            candidates.append(rel_path)
+
+            payload_path: Path | None = None
+            for candidate in candidates:
+                candidate_path = (
+                    modified_dir / Path(*candidate.split("/")) if candidate else modified_dir
+                )
+                if candidate_path.exists():
+                    payload_path = candidate_path
+                    break
+
+            if payload_path is None:
                 continue
+
             replacements[rel_path] = payload_path.read_bytes()
 
         if not replacements:
@@ -938,17 +1035,25 @@ class TextureManagerGUI:
 
     def _export_entries(
         self, destination_path: Path, entries: Sequence[Dict[str, object]]
-    ) -> int:
+    ) -> Tuple[int, List[Tuple[str, str]]]:
         count = 0
+        renamed: List[Tuple[str, str]] = []
         for entry in entries:
             payload = self.archive_bytes[entry["offset"] : entry["offset"] + entry["size"]]
             relative_path = entry["relative_path"]
-            relative_target = Path(*relative_path.split("/")) if relative_path else Path()
+            export_relative, original_relative = resolve_export_relative_path(
+                relative_path, payload
+            )
+            relative_target = (
+                Path(*export_relative.split("/")) if export_relative else Path()
+            )
             target = destination_path / relative_target
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(payload)
+            if original_relative is not None:
+                renamed.append((original_relative, export_relative))
             count += 1
-        return count
+        return count, renamed
 
     def _set_channel_controls_state(self, state: str) -> None:
         for button in self.channel_buttons.values():
@@ -1117,8 +1222,13 @@ class TextureManagerGUI:
 
         destination_path = Path(destination)
         entries = [self.entries[index] for index in indices]
-        count = self._export_entries(destination_path, entries)
-        self._set_status(f"Exported {count} file(s) to {destination_path}")
+        count, renamed = self._export_entries(destination_path, entries)
+        rename_note = (
+            f"; adjusted extensions for {len(renamed)} file(s)"
+            if renamed
+            else ""
+        )
+        self._set_status(f"Exported {count} file(s) to {destination_path}{rename_note}")
 
     def export_all(self) -> None:
         if self.archive_bytes is None:
@@ -1133,8 +1243,13 @@ class TextureManagerGUI:
             return
 
         destination_path = Path(destination)
-        count = self._export_entries(destination_path, self.entries)
-        self._set_status(f"Exported {count} file(s) to {destination_path}")
+        count, renamed = self._export_entries(destination_path, self.entries)
+        rename_note = (
+            f"; adjusted extensions for {len(renamed)} file(s)"
+            if renamed
+            else ""
+        )
+        self._set_status(f"Exported {count} file(s) to {destination_path}{rename_note}")
 
     def import_replacement(self) -> None:
         if self.archive_bytes is None:

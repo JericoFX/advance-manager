@@ -1,4 +1,8 @@
+import sys
 import unittest
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from rs import RSFL_ENTRY_STRUCT, RSFLParsingError, _apply_replacements
 
