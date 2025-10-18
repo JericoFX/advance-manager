@@ -1650,24 +1650,32 @@ class TextureManagerGUI:
         return Path(filename)
 
     def _create_patch_archive(
-        self, patch_path: Path, replacements: Dict[str, bytes]
+        self,
+        patch_path: Path,
+        replacements: Dict[str, bytes],
+        *,
+        archive_bytes: bytes | mmap.mmap | None = None,
+        entries: Sequence[Dict[str, object]] | None = None,
     ) -> List[str]:
         """Write a patch archive reflecting *replacements* to *patch_path*."""
 
-        if self.archive_bytes is None or self.layout_info is None:
+        archive_bytes = archive_bytes if archive_bytes is not None else self.archive_bytes
+        entries = entries if entries is not None else self.entries
+
+        if archive_bytes is None or self.layout_info is None or entries is None:
             raise RSFLParsingError("open an archive before creating a patch")
 
         manifest = {
             "archive": self.archive_path.name if self.archive_path else "",
             "rsfl": copy.deepcopy(self.layout_info),
-            "files": [copy.deepcopy(entry) for entry in self.entries],
+            "files": [copy.deepcopy(entry) for entry in entries],
         }
 
         patch_bytes, written = generate_patch_archive(
             manifest,
             replacements,
-            archive_bytes=self.archive_bytes,
-            original_entries=self.entries,
+            archive_bytes=archive_bytes,
+            original_entries=entries,
         )
 
         if not written:
@@ -1778,16 +1786,14 @@ class TextureManagerGUI:
                 progress_window.destroy()
 
             if status == "success":
-                _release_archive_buffer(previous_buffer)
-                self.archive_bytes = new_archive_bytes
-                self.entries = updated_entries
-                self.replacements.clear()
-                self._refresh_list()
                 patch_note = ""
                 if patch_destination is not None:
                     try:
                         written = self._create_patch_archive(
-                            patch_destination, pending_replacements
+                            patch_destination,
+                            pending_replacements,
+                            archive_bytes=previous_buffer,
+                            entries=staged_entries,
                         )
                     except RSFLParsingError as exc:  # pragma: no cover - GUI path
                         messagebox.showinfo("Patch archive not created", str(exc))
@@ -1801,6 +1807,12 @@ class TextureManagerGUI:
                             "Patch archive saved",
                             f"Patch archive written to {patch_destination} ({len(written)} file(s))",
                         )
+
+                _release_archive_buffer(previous_buffer)
+                self.archive_bytes = new_archive_bytes
+                self.entries = updated_entries
+                self.replacements.clear()
+                self._refresh_list()
                 self._set_status(f"Saved patched archive to {output_path}{patch_note}")
                 messagebox.showinfo(
                     "Archive saved", f"Patched archive written to {output_path}"
