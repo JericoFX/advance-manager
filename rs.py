@@ -1159,6 +1159,7 @@ class TextureManagerGUI:
 
         self.archive_path: Path | None = None
         self.archive_bytes: bytes | mmap.mmap | None = None
+        self.all_entries: List[Dict[str, object]] = []
         self.entries: List[Dict[str, object]] = []
         self.replacements: Dict[str, bytes] = {}
         self.wrapper_info: Dict[str, object] | None = None
@@ -1526,7 +1527,10 @@ class TextureManagerGUI:
             messagebox.showerror("Unable to open archive", str(exc))
             return
 
-        image_entries = [entry for entry in entries if is_image_entry(entry["relative_path"])]
+        all_entries = copy.deepcopy(entries)
+        image_entries = [
+            entry for entry in all_entries if is_image_entry(entry["relative_path"])
+        ]
         if not image_entries:
             messagebox.showinfo(
                 "No textures found",
@@ -1536,6 +1540,7 @@ class TextureManagerGUI:
         _release_archive_buffer(previous_buffer)
         self.archive_path = Path(filename)
         self.archive_bytes = data
+        self.all_entries = all_entries
         self.entries = image_entries
         self.replacements.clear()
         self.wrapper_info = wrapper
@@ -1678,7 +1683,7 @@ class TextureManagerGUI:
         """Write a patch archive reflecting *replacements* to *patch_path*."""
 
         archive_bytes = archive_bytes if archive_bytes is not None else self.archive_bytes
-        entries = entries if entries is not None else self.entries
+        entries = entries if entries is not None else self.all_entries
 
         if archive_bytes is None or self.layout_info is None or entries is None:
             raise RSFLParsingError("open an archive before creating a patch")
@@ -1724,7 +1729,7 @@ class TextureManagerGUI:
             return
 
         previous_buffer = self.archive_bytes
-        staged_entries = copy.deepcopy(self.entries)
+        staged_entries = copy.deepcopy(self.all_entries)
         pending_replacements = dict(self.replacements)
 
         try:
@@ -1828,7 +1833,12 @@ class TextureManagerGUI:
 
                 _release_archive_buffer(previous_buffer)
                 self.archive_bytes = new_archive_bytes
-                self.entries = updated_entries
+                self.all_entries = updated_entries
+                self.entries = [
+                    entry
+                    for entry in updated_entries
+                    if is_image_entry(entry["relative_path"])
+                ]
                 self.replacements.clear()
                 self._refresh_list()
                 self._set_status(f"Saved patched archive to {output_path}{patch_note}")
