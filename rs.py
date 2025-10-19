@@ -2031,7 +2031,18 @@ class TextureManagerGUI:
         """Write a patch archive reflecting *replacements* to *patch_path*."""
 
         archive_bytes = archive_bytes if archive_bytes is not None else self.archive_bytes
-        entries = entries if entries is not None else self.all_entries
+
+        if entries is None:
+            # ``TextureManagerGUI`` normally initialises ``all_entries`` in ``__init__``
+            # but the GUI helper is also exercised by the test-suite using a manually
+            # constructed instance (``object.__new__``) to avoid spinning up a full
+            # Tkinter environment.  Merge refactors introduced an unconditional
+            # reference to ``self.all_entries`` here, which breaks that test harness
+            # and any other callers providing only ``entries``.  Fall back gracefully
+            # so the helper continues to operate with just ``self.entries`` available.
+            entries = getattr(self, "all_entries", None)
+            if entries is None:
+                entries = getattr(self, "entries", None)
 
         if archive_bytes is None or self.layout_info is None or entries is None:
             raise RSFLParsingError("open an archive before creating a patch")

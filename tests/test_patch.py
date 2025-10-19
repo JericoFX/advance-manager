@@ -151,6 +151,48 @@ class PatchArchiveTests(unittest.TestCase):
             finally:
                 rs._release_archive_buffer(archive_bytes)
 
+    def test_gui_patch_helper_uses_all_entries_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            archive_path = tmp / "gui_source.asr"
+            _build_rsfl_archive(archive_path)
+
+            archive_bytes, layout_info, entries, _wrapper = rs.load_archive(archive_path)
+            try:
+                gui = object.__new__(rs.TextureManagerGUI)
+                gui.archive_path = archive_path
+                gui.archive_bytes = archive_bytes
+                gui.all_entries = [copy.deepcopy(entry) for entry in entries]
+                gui.layout_info = layout_info
+                gui.wrapper_info = {"kind": "raw"}
+
+                first_entry = gui.all_entries[0]
+                original_payload = archive_bytes[
+                    first_entry["offset"] : first_entry["offset"] + first_entry["size"]
+                ]
+                replacements = {
+                    first_entry["relative_path"]: original_payload[::-1],
+                }
+
+                patch_path = tmp / "gui_patch_all_entries.asr"
+                written = gui._create_patch_archive(patch_path, replacements)
+
+                self.assertTrue(patch_path.exists())
+                self.assertEqual(written, [first_entry["relative_path"]])
+
+                patch_bytes, _info, patch_entries, _ = rs.load_archive(patch_path)
+                try:
+                    self.assertEqual(len(patch_entries), 1)
+                    patched = patch_bytes[
+                        patch_entries[0]["offset"] : patch_entries[0]["offset"]
+                        + patch_entries[0]["size"]
+                    ]
+                    self.assertEqual(patched, original_payload[::-1])
+                finally:
+                    rs._release_archive_buffer(patch_bytes)
+            finally:
+                rs._release_archive_buffer(archive_bytes)
+
 
 if __name__ == "__main__":
     unittest.main()
