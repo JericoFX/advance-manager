@@ -1286,7 +1286,7 @@ class TextureManagerGUI:
 
         button_frame = tk.Frame(self.root)
         button_frame.grid(row=1, column=0, columnspan=2, sticky="ew", padx=10, pady=8)
-        for i in range(5):
+        for i in range(6):
             button_frame.columnconfigure(i, weight=1)
 
         tk.Button(button_frame, text="Open Archive", command=self.open_archive).grid(
@@ -1301,11 +1301,20 @@ class TextureManagerGUI:
         tk.Button(button_frame, text="Import Replacement", command=self.import_replacement).grid(
             row=0, column=3, padx=4
         )
-        tk.Button(button_frame, text="Save Patched Archive", command=self.save_patched_archive).grid(
+        tk.Button(button_frame, text="Create Patch", command=self.create_patch_archive).grid(
             row=0, column=4, padx=4
         )
+        tk.Button(button_frame, text="Save Patched Archive", command=self.save_patched_archive).grid(
+            row=0, column=5, padx=4
+        )
 
-        self.status = tk.StringVar(value="Select an archive to begin")
+        self.status = tk.StringVar(
+            value=(
+                "Select an archive to begin. "
+                "'Save Patched Archive' writes a full copy while "
+                "'Create Patch' exports only modified files."
+            )
+        )
         status_bar = tk.Label(self.root, textvariable=self.status, anchor="w")
         status_bar.grid(row=2, column=0, columnspan=2, sticky="ew", padx=10, pady=(0, 8))
 
@@ -1641,23 +1650,29 @@ class TextureManagerGUI:
             f"Queued replacement for {entry['relative_path']} ({len(payload)} bytes)"
         )
 
-    def _ask_patch_destination(self, archive_output: Path) -> Path | None:
+    def _ask_patch_destination(
+        self,
+        archive_output: Path,
+        *,
+        require_confirmation: bool = True,
+    ) -> Path | None:
         """Return the destination path for an optional patch archive."""
 
         if self.layout_info is None:
             return None
 
         default_patch = archive_output.with_suffix(archive_output.suffix + ".patch.asr")
-        try:
-            confirm = messagebox.askyesno(
-                "Create patch archive?",
-                "Would you like to generate a separate patch archive containing only the modified files?",
-            )
-        except tk.TclError:
-            confirm = False
+        if require_confirmation:
+            try:
+                confirm = messagebox.askyesno(
+                    "Create patch archive?",
+                    "Would you like to generate a separate patch archive containing only the modified files?",
+                )
+            except tk.TclError:
+                confirm = False
 
-        if not confirm:
-            return None
+            if not confirm:
+                return None
 
         filename = filedialog.asksaveasfilename(
             title="Save patch archive",
@@ -1708,6 +1723,45 @@ class TextureManagerGUI:
         patch_path.write_bytes(patch_bytes)
         return written
 
+    def create_patch_archive(self) -> None:
+        if self.archive_bytes is None or self.archive_path is None:
+            messagebox.showwarning(
+                "No archive", "Open an archive before creating a patch."
+            )
+            return
+        if not self.replacements:
+            messagebox.showinfo("No replacements", "Import at least one texture first.")
+            return
+
+        patch_destination = self._ask_patch_destination(
+            self.archive_path, require_confirmation=False
+        )
+        if patch_destination is None:
+            return
+
+        pending_replacements = dict(self.replacements)
+
+        try:
+            written = self._create_patch_archive(patch_destination, pending_replacements)
+        except RSFLParsingError as exc:  # pragma: no cover - GUI path
+            messagebox.showinfo("Patch archive not created", str(exc))
+            return
+        except Exception as exc:  # pragma: no cover - GUI path
+            messagebox.showerror("Unable to create patch archive", str(exc))
+            return
+
+        count = len(written)
+        self._set_status(
+            f"Patch archive written to {patch_destination} ({count} file(s))"
+        )
+        messagebox.showinfo(
+            "Patch archive saved",
+            (
+                f"Patch archive written to {patch_destination} ({count} file(s))\n"
+                "Use 'Save Patched Archive' to write the full archive if you need a complete file."
+            ),
+        )
+
     def save_patched_archive(self) -> None:
         if self.archive_bytes is None or self.archive_path is None:
             messagebox.showwarning("No archive", "Open an archive before saving.")
@@ -1744,8 +1798,6 @@ class TextureManagerGUI:
         wrapped = _wrap_asura_container(new_archive_bytes, self.wrapper_info or {"kind": "raw"})
         output_path = Path(filename)
         output_path.parent.mkdir(parents=True, exist_ok=True)
-
-        patch_destination = self._ask_patch_destination(output_path)
 
         total_size = len(wrapped)
         maximum = max(total_size, 1)
@@ -1809,28 +1861,6 @@ class TextureManagerGUI:
                 progress_window.destroy()
 
             if status == "success":
-                patch_note = ""
-                if patch_destination is not None:
-                    try:
-                        written = self._create_patch_archive(
-                            patch_destination,
-                            pending_replacements,
-                            archive_bytes=previous_buffer,
-                            entries=staged_entries,
-                        )
-                    except RSFLParsingError as exc:  # pragma: no cover - GUI path
-                        messagebox.showinfo("Patch archive not created", str(exc))
-                    except Exception as exc:  # pragma: no cover - GUI path
-                        messagebox.showerror(
-                            "Unable to create patch archive", str(exc)
-                        )
-                    else:
-                        patch_note = f"; patch saved to {patch_destination}"
-                        messagebox.showinfo(
-                            "Patch archive saved",
-                            f"Patch archive written to {patch_destination} ({len(written)} file(s))",
-                        )
-
                 _release_archive_buffer(previous_buffer)
                 self.archive_bytes = new_archive_bytes
                 self.all_entries = updated_entries
@@ -1841,7 +1871,7 @@ class TextureManagerGUI:
                 ]
                 self.replacements.clear()
                 self._refresh_list()
-                self._set_status(f"Saved patched archive to {output_path}{patch_note}")
+                self._set_status(f"Saved patched archive to {output_path}")
                 messagebox.showinfo(
                     "Archive saved", f"Patched archive written to {output_path}"
                 )
