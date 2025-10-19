@@ -1442,9 +1442,13 @@ class TextureManagerGUI:
             tags: Tuple[str, ...] = ()
             name_display = segments[-1] if segments else relative_path
             if replacement is not None:
-                replacement_size = len(replacement)
-                if replacement_size != entry["size"]:
-                    size_text += f" → {replacement_size} bytes"
+                replacement_payload = _extract_replacement_payload(replacement)
+                if replacement_payload is not None:
+                    replacement_size = len(replacement_payload)
+                    if replacement_size != entry["size"]:
+                        size_text += f" → {replacement_size} bytes"
+                else:
+                    size_text += " → (missing payload)"
                 name_display += " *"
                 tags = ("modified",)
             node_id = self.tree.insert(
@@ -1748,10 +1752,19 @@ class TextureManagerGUI:
         entry = self.node_to_entry[focus_node]
         self.last_activated_path = entry["relative_path"]
         replacement = self.replacements.get(entry["relative_path"])
+        payload = None
         if replacement is not None:
-            payload = replacement
-        else:
+            payload = _extract_replacement_payload(replacement)
+            if payload is None:
+                self._clear_preview("Replacement missing payload; unable to preview")
+                self._set_status(
+                    f"Replacement for {entry['relative_path']} is missing payload bytes"
+                )
+                return
+
+        if payload is None:
             payload = self.archive_bytes[entry["offset"] : entry["offset"] + entry["size"]]
+
         if not payload:
             self._clear_preview("Empty payload; nothing to preview")
             self._set_status(f"Entry {entry['relative_path']} has no data to preview")

@@ -1,4 +1,5 @@
 import copy
+import io
 import json
 import struct
 import tempfile
@@ -152,6 +153,116 @@ class PatchArchiveTests(unittest.TestCase):
                     rs._release_archive_buffer(patch_bytes)
             finally:
                 rs._release_archive_buffer(archive_bytes)
+
+    def test_gui_on_entry_selected_uses_replacement_payload(self) -> None:
+        class DummyTree:
+            def __init__(self, node_id: str) -> None:
+                self._selection = (node_id,)
+                self._focus = node_id
+
+            def selection(self) -> Tuple[str, ...]:
+                return self._selection
+
+            def focus(self, value: str | None = None) -> str:
+                if value is None:
+                    return self._focus
+                self._focus = value
+                return self._focus
+
+            def see(self, _value: str) -> None:
+                pass
+
+        class DummyLabel:
+            def __init__(self) -> None:
+                self.configure_calls: List[Dict[str, object]] = []
+                self.image = None
+
+            def configure(self, **kwargs: object) -> None:
+                self.configure_calls.append(kwargs)
+
+        class FakeImageModule:
+            last_opened_payload: bytes | None = None
+
+            class FakeImage:
+                def __init__(self, payload: bytes) -> None:
+                    self.payload = payload
+                    self.format = "FAKE"
+
+                def load(self) -> None:
+                    pass
+
+                def convert(self, _mode: str) -> "FakeImageModule.FakeImage":
+                    return self
+
+            @staticmethod
+            def open(stream: io.BytesIO) -> "FakeImageModule.FakeImage":
+                data = stream.getvalue()
+                FakeImageModule.last_opened_payload = data
+                return FakeImageModule.FakeImage(data)
+
+        class FakeImageTkModule:
+            last_photo_image: object | None = None
+
+            @staticmethod
+            def PhotoImage(image: object) -> object:
+                FakeImageTkModule.last_photo_image = image
+                return object()
+
+        replacement_payload = b"replacement-bytes"
+        original_payload = b"original-bytes"
+        entry = {
+            "relative_path": "textures/test.dds",
+            "offset": 0,
+            "size": len(original_payload),
+        }
+
+        gui = object.__new__(rs.TextureManagerGUI)
+        gui.archive_bytes = original_payload
+        gui.entries = [entry]
+        gui.replacements = {
+            entry["relative_path"]: {
+                "payload": replacement_payload,
+                "metadata": {"source": "test"},
+            }
+        }
+        gui.node_to_entry = {"node-1": entry}
+        gui.entry_nodes = {entry["relative_path"]: "node-1"}
+        gui.tree = DummyTree("node-1")
+        gui.last_activated_path = None
+        gui.preview_label = DummyLabel()
+        gui._set_channel_controls_state = lambda *_args, **_kwargs: None
+        gui._update_channel_preview = lambda *_args, **_kwargs: None
+        gui._update_preview_scrollregion = lambda *_args, **_kwargs: None
+        cleared_messages: List[str | None] = []
+        gui._clear_preview = lambda message=None: cleared_messages.append(message)
+        status_messages: List[str] = []
+        gui._set_status = lambda message: status_messages.append(message)
+
+        original_image = rs.Image
+        original_image_tk = rs.ImageTk
+        original_unidentified = rs.UnidentifiedImageError
+        original_pil_available = rs.PIL_AVAILABLE
+        original_pil_imagetk_available = rs.PIL_IMAGETK_AVAILABLE
+        rs.Image = FakeImageModule
+        rs.ImageTk = FakeImageTkModule
+        rs.UnidentifiedImageError = RuntimeError
+        rs.PIL_AVAILABLE = True
+        rs.PIL_IMAGETK_AVAILABLE = True
+        try:
+            gui._on_entry_selected(None)
+        finally:
+            rs.Image = original_image
+            rs.ImageTk = original_image_tk
+            rs.UnidentifiedImageError = original_unidentified
+            rs.PIL_AVAILABLE = original_pil_available
+            rs.PIL_IMAGETK_AVAILABLE = original_pil_imagetk_available
+
+        self.assertFalse(cleared_messages, "replacement preview should not clear the preview")
+        self.assertIsNotNone(gui.preview_source_image)
+        self.assertEqual(gui.preview_source_image.payload, replacement_payload)
+        self.assertEqual(FakeImageModule.last_opened_payload, replacement_payload)
+        self.assertTrue(status_messages)
+        self.assertIn(entry["relative_path"], status_messages[-1])
 
     def test_gui_patch_helper_uses_all_entries_fallback(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
