@@ -146,19 +146,41 @@ EmployeeCache = {
 }
 ```
 
-## RS Archive Utility Distribution
+## RS Texture Manager
 
-The repository ships with `rs.py`, a standalone helper for extracting and repacking Asura RS archives. The script supports Windows, Linux, and macOS – on Windows the tool opens archives in binary mode so memory-mapped reads work without newline conversion.
+The repository ships with `rs.py`, a GUI-first tool for navegar, previsualizar y modificar texturas dentro de archivos RS del motor Asura. Al ejecutarlo se abre directamente una interfaz moderna basada en `ttk` con estas capacidades:
 
-### Automated executables
+- Apertura y exploración del árbol de texturas con búsqueda instantánea.
+- Exportación múltiple, incluyendo carpetas completas seleccionadas en el árbol.
+- Importación asistida con avisos cuando el formato del reemplazo (p. ej. BC/DXT o canal alfa) no coincide con el original.
+- Arrastrar y soltar de ficheros DDS/PNG/TGA sobre la ventana para evitar el cuadro de diálogo.
+- Generación opcional de copias de seguridad en la carpeta `rsmanager_backups`.
 
-A GitHub Actions workflow (`package-rs.yml`) builds standalone binaries using PyInstaller for both Windows (`rs.exe`) and Linux (`rs`). Every push to `main` or a pull request run produces downloadable artifacts, and tagging a release with the pattern `v*` automatically creates a GitHub Release that bundles the packaged binaries for both platforms.
+### Dependencias
 
-If you prefer manual packaging, install PyInstaller locally and run:
+Las dependencias necesarias se describen en `requirements.txt`. Puedes instalarlas con:
+
+```bash
+python -m pip install -r requirements.txt
+```
+
+En Windows, ejecuta `scripts\install_windows_dependencies.bat` para automatizar la instalación (acepta de forma opcional la ruta del intérprete de Python).
+
+### Ejecución
+
+```bash
+python rs.py
+```
+
+Si Tkinter está disponible se abrirá la ventana principal. Desde ahí podrás abrir un archivo `.asr`, importar reemplazos y crear parches con unos pocos clics.
+
+### Empaquetado
+
+Si necesitas un ejecutable autónomo puedes seguir usando PyInstaller. Instala las dependencias y ejecuta:
 
 ```bash
 python -m pip install pyinstaller
-pyinstaller --onefile rs.py
+pyinstaller --onefile rs.py --hidden-import=tkinterdnd2
 ```
 
-The resulting binary is placed under the `dist/` folder.
+El binario aparecerá en la carpeta `dist/`. Asegúrate de incluir los assets de TkinterDnD2 en el paquete final para conservar el arrastrar y soltar.

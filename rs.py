@@ -1,49 +1,34 @@
 #!/usr/bin/env python3
-"""Utility helpers for extracting and repacking Asura RS managed archives.
+"""Utility helpers for working with Asura RS managed archives.
 
 The original RSFL_ASR.cpp tool published by Trololp/Vhetration only supported
-extracting data from an RSFL chunk.  This script extends that behaviour so the
+extracting data from an RSFL chunk.  This module extends that behaviour so the
 extracted payloads can be modified and written back into the original archive
 without rebuilding the whole container from scratch.
 
-Two subcommands are provided:
-
-```
-python rsfl_tool.py extract <archive.asr> <output_dir>
-python rsfl_tool.py repack <archive.asr> <manifest.json> <input_dir> <output.asr>
-```
-
-The *extract* command mirrors the behaviour of the legacy tool: it pulls every
-resource referenced by the RSFL table into ``<output_dir>``.  In addition it
-creates ``manifest.json`` which records the offsets and sizes of all entries as
-they appear in the archive.  The manifest is later consumed by *repack*.
-
-The *repack* command keeps the layout of the original archive intact.  RSFL
-entries can grow or shrink in size – the script appends resized payloads to the
-end of the archive and updates the offset table accordingly.  RSCF controlled
-entries must preserve their original size because their payload is embedded
-inside fixed-width chunks whose headers would otherwise need to be rewritten.
-
-While this script is intentionally conservative it enables a fast edit cycle:
-extract ➜ tweak asset ➜ repack.  The RSFL manifest contains enough contextual
-information so that a future enhancement could also rebuild the RSCF chunk
-headers when supporting payloads that change size.
+The functionality now focuses on the graphical texture manager: users open an
+archive, inspect textures and queue replacements directly from the GUI.  All of
+the low level helpers that previously powered the command line interface remain
+available for programmatic use (for example in automated tests), but running the
+module launches the modernised Tk application instead of a CLI dispatcher.
 """
 
 from __future__ import annotations
 
-import argparse
 import io
 import json
 import mmap
 import os
 import shutil
+import shlex
 import struct
 import threading
 import zlib
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, List, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Sequence, Tuple
+
+import textwrap
 
 import copy
 
@@ -58,6 +43,15 @@ try:
     TK_AVAILABLE = True
 except Exception:  # pragma: no cover - Tkinter availability is platform specific.
     TK_AVAILABLE = False
+
+try:  # pragma: no cover - Drag and drop support depends on optional packages.
+    from tkinterdnd2 import DND_FILES, TkinterDnD
+
+    TKDND_AVAILABLE = True
+except Exception:  # pragma: no cover - optional dependency.
+    DND_FILES = None
+    TkinterDnD = None  # type: ignore[assignment]
+    TKDND_AVAILABLE = False
 
 Image = None
 ImageTk = None
@@ -1384,9 +1378,14 @@ class TextureManagerGUI:
         if not TK_AVAILABLE:
             raise RuntimeError("Tkinter is not available on this platform")
 
-        self.root = tk.Tk()
+        if TKDND_AVAILABLE and TkinterDnD is not None:
+            self.root = TkinterDnD.Tk()
+        else:
+            self.root = tk.Tk()
         self.root.title("RSFL Texture Manager")
         self.root.geometry("720x480")
+
+        self._configure_styles()
 
         self.archive_path: Path | None = None
         self.archive_bytes: bytes | mmap.mmap | None = None
@@ -1401,17 +1400,377 @@ class TextureManagerGUI:
         self.node_to_path: Dict[str, Tuple[str, ...]] = {}
         self.last_activated_path: str | None = None
         self._expand_all_on_refresh = False
+        self.drag_and_drop_enabled = False
+
+        self.backup_var = tk.BooleanVar(value=False)
+        self.backup_prompted = False
 
         self._build_ui()
+        self._setup_drag_and_drop()
         self.root.protocol("WM_DELETE_WINDOW", self._shutdown)
 
     # ------------------------------------------------------------------ UI --
+    def _configure_styles(self) -> None:
+        if not TK_AVAILABLE:
+            return
+
+        style = ttk.Style()
+        try:
+            style.theme_use("clam")
+        except tk.TclError:
+            pass
+
+        base_background = style.lookup("TFrame", "background") or "#f0f0f0"
+        self.root.configure(background=base_background)
+
+        style.configure("Modern.TFrame", background=base_background)
+        style.configure("Modern.TLabel", background=base_background, font=("Segoe UI", 10))
+        style.configure("Status.TLabel", background=base_background, font=("Segoe UI", 9))
+        style.configure("Accent.TButton", padding=(10, 6))
+        style.map(
+            "Accent.TButton",
+            background=[("active", "#4c6ef5"), ("disabled", "#bfc4d6")],
+            foreground=[("active", "#ffffff"), ("disabled", "#6c7489")],
+        )
+        style.configure("Accent.TButton", background="#3b5bdb", foreground="#ffffff")
+        style.configure("Treeview", font=("Segoe UI", 10))
+        style.configure("Treeview.Heading", font=("Segoe UI", 10, "bold"))
+        style.configure("Modern.TCheckbutton", background=base_background, font=("Segoe UI", 9))
+
+    def _setup_drag_and_drop(self) -> None:
+        if not (TKDND_AVAILABLE and DND_FILES and hasattr(self, "root")):
+            return
+
+        widgets = []
+        for attr in ("tree", "preview_canvas", "root"):
+            widget = getattr(self, attr, None)
+            if widget is not None:
+                widgets.append(widget)
+
+        for widget in widgets:
+            try:
+                widget.drop_target_register(DND_FILES)
+                widget.dnd_bind("<<Drop>>", self._on_files_dropped)
+                self.drag_and_drop_enabled = True
+            except Exception:  # pragma: no cover - depends on tkdnd availability
+                continue
+
+    def _on_files_dropped(self, event: object) -> None:
+        if self.archive_bytes is None:
+            return
+
+        data = getattr(event, "data", "")
+        if not data:
+            return
+
+        paths: List[Path] = []
+        try:
+            raw_paths = self.root.tk.splitlist(data)
+        except Exception:
+            try:
+                raw_paths = shlex.split(data)
+            except ValueError:
+                raw_paths = [data]
+        for item in raw_paths:
+            path_text = item.strip()
+            if not path_text:
+                continue
+            cleaned = path_text
+            if cleaned.startswith("{") and cleaned.endswith("}"):
+                cleaned = cleaned[1:-1]
+            paths.append(Path(cleaned))
+
+        if not paths:
+            return
+
+        entry = self._current_entry_selection()
+        if entry is None:
+            messagebox.showinfo(
+                "Selecciona una textura",
+                "Elige una textura en la lista antes de soltar un archivo.",
+            )
+            return
+
+        self._import_replacement_from_path(entry, paths[0])
+
+    def _current_entry_selection(self) -> Dict[str, object] | None:
+        node_ids = [
+            node_id for node_id in self.tree.selection() if node_id in self.node_to_entry
+        ]
+        if node_ids:
+            return self.node_to_entry[node_ids[-1]]
+        if self.last_activated_path and self.last_activated_path in self.entry_nodes:
+            node_id = self.entry_nodes[self.last_activated_path]
+            return self.node_to_entry.get(node_id)
+        return None
+
+    def _collect_entries_from_nodes(
+        self, node_ids: Sequence[str]
+    ) -> List[Dict[str, object]]:
+        collected: List[Dict[str, object]] = []
+        seen: set[str] = set()
+
+        def visit(node_id: str) -> None:
+            if node_id in self.node_to_entry:
+                entry = self.node_to_entry[node_id]
+                relative_path = entry.get("relative_path")
+                if isinstance(relative_path, str) and relative_path not in seen:
+                    collected.append(entry)
+                    seen.add(relative_path)
+            if hasattr(self.tree, "get_children"):
+                try:
+                    children = self.tree.get_children(node_id)
+                except (tk.TclError, AttributeError):
+                    children = ()
+            else:
+                children = ()
+            for child in children:
+                visit(child)
+
+        for node_id in node_ids:
+            visit(node_id)
+
+        return collected
+
+    def _load_sidecar_metadata(
+        self, source_path: Path, source_info: Dict[str, object]
+    ) -> Dict[str, object] | None:
+        metadata_path = source_path.with_name(source_path.name + ".rsmeta")
+        if not metadata_path.exists():
+            alternate_metadata = source_path.with_suffix(".rsmeta")
+            if alternate_metadata.exists():
+                metadata_path = alternate_metadata
+
+        if not metadata_path.exists():
+            return None
+
+        try:
+            metadata = json.loads(metadata_path.read_text())
+        except Exception as exc:  # pragma: no cover - GUI path
+            messagebox.showwarning(
+                "Metadata no cargada",
+                (
+                    f"No se pudo leer la metadata de {metadata_path.name}: {exc}.\n"
+                    "Se utilizará la textura seleccionada actualmente."
+                ),
+            )
+            return None
+
+        source_info["metadata_path"] = str(metadata_path)
+        source_info["metadata"] = metadata
+        return metadata if isinstance(metadata, dict) else None
+
+    def _resolve_entry_from_metadata(
+        self,
+        entry: Dict[str, object],
+        metadata: Dict[str, object] | None,
+        source_info: Dict[str, object],
+    ) -> Tuple[Dict[str, object] | None, str]:
+        if not isinstance(metadata, dict):
+            return entry, ""
+
+        metadata_note = ""
+        meta_relative = metadata.get("relative_path")
+        if isinstance(meta_relative, str) and meta_relative:
+            resolved_entry = next(
+                (
+                    candidate
+                    for candidate in self.entries
+                    if candidate.get("relative_path") == meta_relative
+                ),
+                None,
+            )
+            if resolved_entry is None:
+                messagebox.showwarning(
+                    "Entrada no encontrada",
+                    (
+                        "La metadata referencia una textura que no se encuentra en el archivo abierto:\n"
+                        f"{meta_relative}\n"
+                        "Selecciona la textura manualmente para continuar."
+                    ),
+                )
+                return entry, ""
+
+            metadata_path = source_info.get("metadata_path")
+            metadata_note = (
+                f" usando metadata de {Path(metadata_path).name}" if metadata_path else ""
+            )
+            return resolved_entry, metadata_note
+
+        messagebox.showwarning(
+            "Metadata incompleta",
+            (
+                "La metadata no contiene un 'relative_path' válido.\n"
+                "Se utilizará la selección actual."
+            ),
+        )
+        return entry, ""
+
+    def _confirm_replacement_format(
+        self, entry: Dict[str, object], payload: bytes
+    ) -> bool:
+        if self.archive_bytes is None:
+            return True
+
+        original = self.archive_bytes[entry["offset"] : entry["offset"] + entry["size"]]
+        warnings: List[str] = []
+
+        original_dds = _parse_dds_header(original)
+        new_dds = _parse_dds_header(payload)
+
+        if original.startswith(b"DDS ") and not payload.startswith(b"DDS "):
+            warnings.append(
+                "La textura original está en formato DDS, pero el archivo importado no lo es."
+            )
+        elif original_dds and new_dds:
+            orig_comp = original_dds.get("compression")
+            new_comp = new_dds.get("compression")
+            if orig_comp and new_comp and orig_comp != new_comp:
+                warnings.append(
+                    f"Se esperaba una textura {orig_comp}, pero el archivo importado es {new_comp}."
+                )
+            orig_alpha = bool(original_dds.get("channel_masks", {}).get("A"))
+            new_alpha = bool(new_dds.get("channel_masks", {}).get("A"))
+            if orig_alpha and not new_alpha:
+                warnings.append(
+                    "La textura original tiene canal alfa y el reemplazo no lo incluye."
+                )
+            if not orig_alpha and new_alpha:
+                warnings.append(
+                    "La textura original no usa canal alfa; verifica que añadirlo no genere artefactos."
+                )
+        elif original_dds and not new_dds:
+            warnings.append(
+                "No se detectó un encabezado DDS válido en el reemplazo, pero la textura original sí lo utiliza."
+            )
+
+        original_suffix = Path(entry.get("relative_path", "")).suffix.lower()
+        source_suffix = ""
+        if payload.startswith(b"DDS "):
+            source_suffix = ".dds"
+        _, detected_extension = detect_image_format(payload)
+        if detected_extension:
+            source_suffix = detected_extension
+        if source_suffix and original_suffix and source_suffix != original_suffix:
+            warnings.append(
+                f"La textura original usa la extensión {original_suffix} pero el archivo importado parece ser {source_suffix}."
+            )
+
+        if not warnings:
+            return True
+
+        message = "\n\n".join(textwrap.fill(text, 90) for text in warnings)
+        message += "\n\n¿Deseas continuar con el reemplazo?"
+        return messagebox.askyesno("Formato inesperado", message)
+
+    def _maybe_prompt_for_backup(self) -> None:
+        if self.backup_prompted:
+            return
+        response = messagebox.askyesno(
+            "Crear respaldo",
+            (
+                "¿Quieres crear una copia de seguridad automática antes de reemplazar texturas?\n"
+                "Puedes cambiar esta preferencia desde la casilla 'Crear respaldo automático'."
+            ),
+        )
+        self.backup_var.set(bool(response))
+        self.backup_prompted = True
+
+    def _maybe_create_backup(self, entry: Dict[str, object], source_path: Path) -> None:
+        if self.archive_bytes is None or not self.backup_var.get():
+            return
+
+        original_payload = self.archive_bytes[entry["offset"] : entry["offset"] + entry["size"]]
+        backup_dir = source_path.parent / "rsmanager_backups"
+        backup_dir.mkdir(parents=True, exist_ok=True)
+
+        relative_path = entry.get("relative_path") or "texture"
+        base_name = Path(relative_path.replace("/", "_") or "texture")
+        suffix = base_name.suffix or source_path.suffix or ".bin"
+        backup_name = f"{base_name.stem}_backup{suffix}"
+        backup_path = backup_dir / backup_name
+        if backup_path.exists():
+            timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+            backup_path = backup_dir / f"{base_name.stem}_backup_{timestamp}{suffix}"
+
+        try:
+            backup_path.write_bytes(original_payload)
+        except Exception as exc:  # pragma: no cover - filesystem errors are environment specific
+            messagebox.showwarning(
+                "Respaldo no creado",
+                f"No se pudo escribir el respaldo en {backup_path}: {exc}",
+            )
+            return
+
+        self._set_status(f"Respaldo guardado en {backup_path}")
+
+    def _import_replacement_from_path(
+        self,
+        initial_entry: Dict[str, object],
+        source_path: Path,
+        *,
+        set_focus: bool = True,
+    ) -> bool:
+        try:
+            payload = source_path.read_bytes()
+        except Exception as exc:  # pragma: no cover - GUI path
+            messagebox.showerror("No se pudo leer la textura", str(exc))
+            return False
+
+        source_info: Dict[str, object] = {"path": str(source_path)}
+        metadata = self._load_sidecar_metadata(source_path, source_info)
+
+        entry, metadata_note = self._resolve_entry_from_metadata(
+            initial_entry, metadata, source_info
+        )
+        if entry is None:
+            return False
+
+        source_info["resolved_relative_path"] = entry["relative_path"]
+
+        self._maybe_prompt_for_backup()
+        if not self._confirm_replacement_format(entry, payload):
+            return False
+
+        self._maybe_create_backup(entry, source_path)
+
+        replacement_record: Dict[str, object] = {
+            "payload": payload,
+            "source_info": source_info,
+        }
+        if isinstance(metadata, dict):
+            for numeric_key in ("offset", "size"):
+                numeric_value = metadata.get(numeric_key)
+                if isinstance(numeric_value, int):
+                    replacement_record[numeric_key] = numeric_value
+
+        self.replacements[entry["relative_path"]] = replacement_record
+        self._refresh_list()
+
+        if set_focus:
+            node_id = self.entry_nodes.get(entry["relative_path"])
+            if node_id is not None:
+                self.tree.selection_set(node_id)
+                self.tree.focus(node_id)
+                self.tree.see(node_id)
+                self.last_activated_path = entry["relative_path"]
+                self._on_entry_selected(None)
+
+        metadata_text = metadata_note or ""
+        self._set_status(
+            (
+                f"Reemplazo preparado para {entry['relative_path']} "
+                f"({len(payload)} bytes){metadata_text}"
+            ).strip()
+        )
+        return True
+
     def _build_ui(self) -> None:
         self.root.rowconfigure(0, weight=1)
         self.root.columnconfigure(0, weight=1)
         self.root.columnconfigure(1, weight=1)
 
-        list_frame = tk.Frame(self.root)
+        list_frame = ttk.Frame(self.root, padding=(10, 10, 5, 10), style="Modern.TFrame")
         list_frame.grid(row=0, column=0, sticky="nsew")
 
         list_frame.rowconfigure(0, weight=1)
@@ -1435,27 +1794,39 @@ class TextureManagerGUI:
         self.tree.bind("<ButtonRelease-1>", self._remember_last_active)
         self.tree.tag_configure("modified", foreground="#d9534f")
 
-        scrollbar = tk.Scrollbar(list_frame, orient=tk.VERTICAL, command=self.tree.yview)
+        scrollbar = ttk.Scrollbar(list_frame, orient=tk.VERTICAL, command=self.tree.yview)
         scrollbar.grid(row=0, column=1, sticky="ns")
         self.tree.configure(yscrollcommand=scrollbar.set)
 
-        control_frame = tk.Frame(list_frame)
+        control_frame = ttk.Frame(list_frame, style="Modern.TFrame")
         control_frame.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(4, 0))
         control_frame.columnconfigure(0, weight=0)
         control_frame.columnconfigure(1, weight=0)
         control_frame.columnconfigure(2, weight=1)
-        tk.Button(control_frame, text="Expand All", command=self._expand_all_nodes).grid(
+        ttk.Button(
+            control_frame,
+            text="Expand All",
+            command=self._expand_all_nodes,
+            style="Accent.TButton",
+        ).grid(
             row=0, column=0, padx=2, sticky="ew"
         )
-        tk.Button(control_frame, text="Collapse All", command=self._collapse_all_nodes).grid(
+        ttk.Button(
+            control_frame,
+            text="Collapse All",
+            command=self._collapse_all_nodes,
+            style="Accent.TButton",
+        ).grid(
             row=0, column=1, padx=2, sticky="ew"
         )
         self.search_var = tk.StringVar()
-        search_entry = tk.Entry(control_frame, textvariable=self.search_var)
+        search_entry = ttk.Entry(control_frame, textvariable=self.search_var)
         search_entry.grid(row=0, column=2, padx=(8, 0), sticky="ew")
         search_entry.bind("<KeyRelease>", self._apply_search_filter)
 
-        preview_frame = tk.Frame(self.root, borderwidth=1, relief=tk.SUNKEN)
+        preview_frame = ttk.Frame(
+            self.root, padding=(5, 10, 10, 10), style="Modern.TFrame"
+        )
         preview_frame.grid(row=0, column=1, sticky="nsew", padx=(10, 10), pady=10)
         preview_frame.rowconfigure(0, weight=1)
         preview_frame.columnconfigure(0, weight=1)
@@ -1464,12 +1835,12 @@ class TextureManagerGUI:
         self.preview_canvas = tk.Canvas(preview_frame, highlightthickness=0)
         self.preview_canvas.grid(row=0, column=0, sticky="nsew")
 
-        self.preview_vscroll = tk.Scrollbar(
+        self.preview_vscroll = ttk.Scrollbar(
             preview_frame, orient=tk.VERTICAL, command=self.preview_canvas.yview
         )
         self.preview_vscroll.grid(row=0, column=1, sticky="ns", rowspan=2)
 
-        self.preview_hscroll = tk.Scrollbar(
+        self.preview_hscroll = ttk.Scrollbar(
             preview_frame, orient=tk.HORIZONTAL, command=self.preview_canvas.xview
         )
         self.preview_hscroll.grid(row=1, column=0, sticky="ew")
@@ -1520,25 +1891,27 @@ class TextureManagerGUI:
         self.preview_canvas.bind("<Button-4>", _on_wheel_up)
         self.preview_canvas.bind("<Button-5>", _on_wheel_down)
 
-        self.preview_label = tk.Label(
+        self.preview_label = ttk.Label(
             self.preview_inner,
             text="Select a texture to preview",
             anchor="center",
             justify="center",
+            style="Modern.TLabel",
         )
         self.preview_label.grid(row=0, column=0, sticky="nsew")
-        self.preview_info_label = tk.Label(
+        self.preview_info_label = ttk.Label(
             self.preview_inner,
             text="",
             anchor="center",
             justify="center",
             font=(None, 9),
+            style="Modern.TLabel",
         )
         self.preview_info_label.grid(row=1, column=0, sticky="ew", pady=(4, 0))
         self.preview_image = None
         self.preview_source_image = None
 
-        channel_frame = tk.Frame(preview_frame)
+        channel_frame = ttk.Frame(preview_frame, style="Modern.TFrame")
         channel_frame.grid(row=2, column=0, columnspan=2, sticky="ew", padx=4, pady=(6, 2))
         for column in range(4):
             channel_frame.columnconfigure(column, weight=1)
@@ -1547,7 +1920,7 @@ class TextureManagerGUI:
         self.channel_buttons = {}
         for idx, channel in enumerate("RGBA"):
             var = tk.IntVar(value=1)
-            btn = tk.Checkbutton(
+            btn = ttk.Checkbutton(
                 channel_frame,
                 text=channel,
                 variable=var,
@@ -1558,31 +1931,54 @@ class TextureManagerGUI:
             self.channel_buttons[channel] = btn
         self._set_channel_controls_state("disabled")
 
-        button_frame = tk.Frame(self.root)
+        button_frame = ttk.Frame(self.root, padding=(10, 0, 10, 8), style="Modern.TFrame")
         button_frame.grid(row=1, column=0, columnspan=2, sticky="ew", padx=10, pady=8)
         for i in range(6):
             button_frame.columnconfigure(i, weight=1)
 
-        tk.Button(button_frame, text="Open Archive", command=self.open_archive).grid(
-            row=0, column=0, padx=4
-        )
-        tk.Button(button_frame, text="Export Selected", command=self.export_selected).grid(
-            row=0, column=1, padx=4
-        )
-        tk.Button(button_frame, text="Export All", command=self.export_all).grid(
-            row=0, column=2, padx=4
-        )
-        tk.Button(button_frame, text="Import Replacement", command=self.import_replacement).grid(
-            row=0, column=3, padx=4
-        )
-        tk.Button(button_frame, text="Create Patch", command=self.create_patch_archive).grid(
-            row=0, column=4, padx=4
-        )
-        tk.Button(
+        ttk.Button(
+            button_frame,
+            text="Open Archive",
+            command=self.open_archive,
+            style="Accent.TButton",
+        ).grid(row=0, column=0, padx=4)
+        ttk.Button(
+            button_frame,
+            text="Export Selected",
+            command=self.export_selected,
+            style="Accent.TButton",
+        ).grid(row=0, column=1, padx=4)
+        ttk.Button(
+            button_frame,
+            text="Export All",
+            command=self.export_all,
+            style="Accent.TButton",
+        ).grid(row=0, column=2, padx=4)
+        ttk.Button(
+            button_frame,
+            text="Import Replacement",
+            command=self.import_replacement,
+            style="Accent.TButton",
+        ).grid(row=0, column=3, padx=4)
+        ttk.Button(
+            button_frame,
+            text="Create Patch",
+            command=self.create_patch_archive,
+            style="Accent.TButton",
+        ).grid(row=0, column=4, padx=4)
+        ttk.Button(
             button_frame,
             text="Load Modification Log",
             command=self.load_replacement_log,
+            style="Accent.TButton",
         ).grid(row=0, column=5, padx=4)
+
+        ttk.Checkbutton(
+            button_frame,
+            text="Crear respaldo automático",
+            variable=self.backup_var,
+            style="Modern.TCheckbutton",
+        ).grid(row=1, column=0, columnspan=6, sticky="w", padx=4, pady=(6, 0))
 
         self.status = tk.StringVar(
             value=(
@@ -1590,7 +1986,9 @@ class TextureManagerGUI:
                 "'Create Patch' exports only modified files and writes a reusable log."
             )
         )
-        status_bar = tk.Label(self.root, textvariable=self.status, anchor="w")
+        status_bar = ttk.Label(
+            self.root, textvariable=self.status, anchor="w", style="Status.TLabel"
+        )
         status_bar.grid(row=2, column=0, columnspan=2, sticky="ew", padx=10, pady=(0, 8))
 
     # ------------------------------------------------------------- utilities --
@@ -2140,9 +2538,11 @@ class TextureManagerGUI:
             messagebox.showwarning("No archive", "Open an archive before exporting.")
             return
 
-        node_ids = [
-            node_id for node_id in self.tree.selection() if node_id in self.node_to_entry
-        ]
+        try:
+            node_ids = list(self.tree.selection())
+        except tk.TclError:
+            node_ids = []
+
         if not node_ids:
             messagebox.showinfo("Nothing selected", "Select one or more entries to export.")
             return
@@ -2152,7 +2552,13 @@ class TextureManagerGUI:
             return
 
         destination_path = Path(destination)
-        entries = [self.node_to_entry[node_id] for node_id in node_ids]
+        entries = self._collect_entries_from_nodes(node_ids)
+        if not entries:
+            messagebox.showinfo(
+                "No textures",
+                "The selected items do not contain any texture entries to export.",
+            )
+            return
         count, renamed = self._export_entries(destination_path, entries)
         rename_note = (
             f"; adjusted extensions for {len(renamed)} file(s)"
@@ -2190,20 +2596,19 @@ class TextureManagerGUI:
 
     def import_replacement(self) -> None:
         if self.archive_bytes is None:
-            messagebox.showwarning("No archive", "Open an archive before importing replacements.")
-            return
-
-        node_ids = [
-            node_id for node_id in self.tree.selection() if node_id in self.node_to_entry
-        ]
-        if len(node_ids) != 1:
-            messagebox.showinfo(
-                "Select a texture",
-                "Choose at most one texture entry before importing a replacement.",
+            messagebox.showwarning(
+                "No archive", "Open an archive before importing replacements."
             )
             return
 
-        selected_entry = self.node_to_entry[node_ids[0]]
+        entry = self._current_entry_selection()
+        if entry is None:
+            messagebox.showinfo(
+                "Selecciona una textura",
+                "Elige una única textura antes de importar un reemplazo.",
+            )
+            return
+
         filename = filedialog.askopenfilename(
             title="Select replacement texture",
             filetypes=[
@@ -2214,116 +2619,7 @@ class TextureManagerGUI:
         if not filename:
             return
 
-        source_path = Path(filename)
-        try:
-            payload = source_path.read_bytes()
-        except Exception as exc:  # pragma: no cover - GUI path
-            messagebox.showerror("Unable to read texture", str(exc))
-            return
-
-        source_info: Dict[str, object] = {"path": str(source_path)}
-        metadata = None
-        metadata_path = source_path.with_name(source_path.name + ".rsmeta")
-        if not metadata_path.exists():
-            alternate_metadata = source_path.with_suffix(".rsmeta")
-            if alternate_metadata.exists():
-                metadata_path = alternate_metadata
-
-        if metadata_path.exists():
-            try:
-                metadata = json.loads(metadata_path.read_text())
-            except Exception as exc:  # pragma: no cover - GUI path
-                messagebox.showwarning(
-                    "Metadata not loaded",
-                    (
-                        f"Could not read metadata from {metadata_path.name}: {exc}.\n"
-                        "The file will be imported using the currently selected entry."
-                    ),
-                )
-            else:
-                source_info["metadata_path"] = str(metadata_path)
-                source_info["metadata"] = metadata
-
-        selected_path = selected_entry.get("relative_path")
-        initial_entry_index = None
-        if selected_path is not None:
-            for idx, candidate in enumerate(self.entries):
-                if candidate.get("relative_path") == selected_path:
-                    initial_entry_index = idx
-                    break
-
-        entry_index = initial_entry_index
-        entry = (
-            self.entries[entry_index]
-            if entry_index is not None and 0 <= entry_index < len(self.entries)
-            else selected_entry
-        )
-        metadata_note = ""
-
-        if isinstance(metadata, dict):
-            meta_relative = metadata.get("relative_path")
-            if isinstance(meta_relative, str) and meta_relative:
-                resolved_index = next(
-                    (
-                        idx
-                        for idx, candidate in enumerate(self.entries)
-                        if candidate.get("relative_path") == meta_relative
-                    ),
-                    None,
-                )
-                if resolved_index is None:
-                    messagebox.showwarning(
-                        "Entry not found",
-                        (
-                            "The metadata references a texture that is not present in the opened archive:\n"
-                            f"{meta_relative}\n"
-                            "Select the desired entry manually to proceed."
-                        ),
-                    )
-                else:
-                    entry_index = resolved_index
-                    entry = self.entries[entry_index]
-                    metadata_note = f" using metadata from {metadata_path.name}"
-            else:
-                messagebox.showwarning(
-                    "Incomplete metadata",
-                    (
-                        f"Metadata file {metadata_path.name} does not include a valid relative_path.\n"
-                        "The current selection will be used instead."
-                    ),
-                )
-
-        if entry is None:
-            messagebox.showinfo(
-                "Select a texture",
-                "Choose a texture entry or use an export-generated metadata file to import automatically.",
-            )
-            return
-
-        source_info["resolved_relative_path"] = entry["relative_path"]
-
-        replacement_record: Dict[str, object] = {
-            "payload": payload,
-            "source_info": source_info,
-        }
-        if isinstance(metadata, dict):
-            for numeric_key in ("offset", "size"):
-                numeric_value = metadata.get(numeric_key)
-                if isinstance(numeric_value, int):
-                    replacement_record[numeric_key] = numeric_value
-
-        self.replacements[entry["relative_path"]] = replacement_record
-        self._refresh_list()
-        node_id = self.entry_nodes.get(entry["relative_path"])
-        if node_id is not None:
-            self.tree.selection_set(node_id)
-            self.tree.focus(node_id)
-            self.tree.see(node_id)
-            self.last_activated_path = entry["relative_path"]
-            self._on_entry_selected(None)
-        self._set_status(
-            f"Queued replacement for {entry['relative_path']} ({len(payload)} bytes){metadata_note}"
-        )
+        self._import_replacement_from_path(entry, Path(filename))
 
     def load_replacement_log(self) -> None:
         if self.archive_bytes is None:
@@ -2771,64 +3067,10 @@ def launch_gui() -> None:
     gui.run()
 
 
-def build_cli() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Extract and repack Asura RSFL archives")
-    subparsers = parser.add_subparsers(dest="command")
-    parser.set_defaults(command="gui")
-
-    extract_parser = subparsers.add_parser("extract", help="extract files and emit a manifest")
-    extract_parser.add_argument(
-        "archive",
-        type=Path,
-        help="path to the Asura archive (.asr / .pc / .es, etc.)",
-    )
-    extract_parser.add_argument("output", type=Path, help="directory that will receive the extracted files")
-
-    repack_parser = subparsers.add_parser("repack", help="repackage modified files back into an archive")
-    repack_parser.add_argument("archive", type=Path, help="original archive used during extraction")
-    repack_parser.add_argument("manifest", type=Path, help="manifest generated by the extract command")
-    repack_parser.add_argument("input_dir", type=Path, help="directory containing the modified files")
-    repack_parser.add_argument("output", type=Path, help="path of the repacked archive")
-
-    patch_parser = subparsers.add_parser(
-        "patch",
-        help="generate a minimal archive containing only modified files",
-    )
-    patch_parser.add_argument("archive", type=Path, help="original archive used during extraction")
-    patch_parser.add_argument(
-        "manifest", type=Path, help="manifest generated by the extract command"
-    )
-    patch_parser.add_argument(
-        "input_dir", type=Path, help="directory containing the modified files"
-    )
-    patch_parser.add_argument("output", type=Path, help="path of the patch archive")
-
-    subparsers.add_parser("gui", help="launch a texture focused graphical interface")
-
-    return parser
-
-
-def main(argv: Iterable[str] | None = None) -> None:
-    parser = build_cli()
-    args = parser.parse_args(argv)
-
-    if args.command == "extract":
-        manifest = extract_archive(args.archive, args.output)
-        print(f"Extraction complete. Manifest written to {manifest}")
-    elif args.command == "repack":
-        repack_archive(args.archive, args.manifest, args.input_dir, args.output)
-        print(f"Repacked archive written to {args.output}")
-    elif args.command == "patch":
-        written = write_patch_archive(args.archive, args.manifest, args.input_dir, args.output)
-        print(
-            f"Patch archive written to {args.output} ({len(written)} file(s) included)"
-        )
-    elif args.command == "gui":
-        if not TK_AVAILABLE:
-            raise SystemExit("Tkinter is not available on this platform; GUI mode is disabled.")
-        launch_gui()
-    else:
-        parser.error("unknown command")
+def main() -> None:
+    if not TK_AVAILABLE:
+        raise SystemExit("Tkinter is not available on this platform; GUI mode is disabled.")
+    launch_gui()
 
 
 if __name__ == "__main__":
