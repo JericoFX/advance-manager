@@ -110,6 +110,36 @@ MAGIC_TO_IMAGE_FORMAT = (
     (b"MM\x00*", "TIFF", ".tif"),
 )
 
+DDS_PIXELFORMAT_STRUCT = struct.Struct("<II4sI4I")
+DDS_DX10_STRUCT = struct.Struct("<5I")
+DDPF_ALPHAPIXELS = 0x00000001
+DDPF_FOURCC = 0x00000004
+DDPF_RGB = 0x00000040
+
+DXGI_FORMAT_NAMES = {
+    70: "BC1_TYPELESS",
+    71: "BC1_UNORM",
+    72: "BC1_UNORM_SRGB",
+    73: "BC2_TYPELESS",
+    74: "BC2_UNORM",
+    75: "BC2_UNORM_SRGB",
+    76: "BC3_TYPELESS",
+    77: "BC3_UNORM",
+    78: "BC3_UNORM_SRGB",
+    79: "BC4_TYPELESS",
+    80: "BC4_UNORM",
+    81: "BC4_SNORM",
+    82: "BC5_TYPELESS",
+    83: "BC5_UNORM",
+    84: "BC5_SNORM",
+    94: "BC6H_TYPELESS",
+    95: "BC6H_UF16",
+    96: "BC6H_SF16",
+    97: "BC7_TYPELESS",
+    98: "BC7_UNORM",
+    99: "BC7_UNORM_SRGB",
+}
+
 
 class RSFLParsingError(RuntimeError):
     """Raised when the archive layout does not match expectations."""
@@ -120,6 +150,108 @@ def normalize_relative_path(name: str) -> str:
 
     normalised = name.replace("\\", "/")
     return normalised.lstrip("/")
+
+
+def _friendly_dxgi_compression_name(name: str) -> str:
+    """Return a succinct description for DXGI compression names."""
+
+    if not name.startswith("BC"):
+        return name
+
+    if "_" not in name:
+        return name
+
+    base, suffix = name.split("_", 1)
+    if not suffix:
+        return base
+
+    if suffix == "UNORM":
+        return base
+    if suffix == "UNORM_SRGB":
+        return f"{base} (sRGB)"
+    if suffix == "TYPELESS":
+        return f"{base} (typeless)"
+    if suffix == "SNORM":
+        return f"{base} (SNORM)"
+    if suffix == "UF16":
+        return f"{base} (UF16)"
+    if suffix == "SF16":
+        return f"{base} (SF16)"
+
+    return f"{base} ({suffix.replace('_', ' ').title()})"
+
+
+def _parse_dds_header(payload: bytes) -> Dict[str, object] | None:
+    """Parse a DDS header to expose compression and channel mask details."""
+
+    if not payload.startswith(b"DDS "):
+        return None
+
+    if len(payload) < 4 + 124:
+        return None
+
+    header = memoryview(payload)
+    try:
+        (
+            pf_size,
+            pf_flags,
+            fourcc_raw,
+            rgb_bit_count,
+            r_mask,
+            g_mask,
+            b_mask,
+            a_mask,
+        ) = DDS_PIXELFORMAT_STRUCT.unpack_from(header, 4 + 72)
+    except struct.error:
+        return None
+
+    if pf_size != DDS_PIXELFORMAT_STRUCT.size:
+        return None
+
+    fourcc = fourcc_raw.rstrip(b"\x00")
+    compression = None
+
+    if pf_flags & DDPF_FOURCC and fourcc:
+        if fourcc == b"DX10" and len(header) >= 4 + 124 + DDS_DX10_STRUCT.size:
+            try:
+                (dxgi_format, _, _, _, _) = DDS_DX10_STRUCT.unpack_from(
+                    header, 4 + 124
+                )
+            except struct.error:
+                dxgi_format = None
+            if dxgi_format is not None:
+                name = DXGI_FORMAT_NAMES.get(dxgi_format)
+                if name:
+                    compression = _friendly_dxgi_compression_name(name)
+                else:
+                    compression = f"DXGI_FORMAT_{dxgi_format}"
+            else:
+                compression = "DX10"
+        else:
+            try:
+                compression = fourcc.decode("ascii").strip() or None
+            except UnicodeDecodeError:
+                compression = None
+    elif pf_flags & DDPF_RGB:
+        bits = rgb_bit_count or 0
+        if pf_flags & DDPF_ALPHAPIXELS:
+            compression = f"Uncompressed {bits}-bit RGBA"
+        else:
+            compression = f"Uncompressed {bits}-bit RGB"
+
+    channel_masks = {
+        "R": r_mask if r_mask else 0,
+        "G": g_mask if g_mask else 0,
+        "B": b_mask if b_mask else 0,
+        "A": a_mask if a_mask else 0,
+    }
+
+    return {
+        "compression": compression,
+        "channel_masks": channel_masks,
+        "pixel_format_flags": pf_flags,
+        "bits_per_pixel": rgb_bit_count,
+    }
 
 
 def _unwrap_asura_container(
@@ -1278,6 +1410,7 @@ class TextureManagerGUI:
         self.preview_window = self.preview_canvas.create_window(
             (0, 0), window=self.preview_inner, anchor="nw"
         )
+        self.preview_inner.grid_columnconfigure(0, weight=1)
 
         def _update_scroll_region(event: object) -> None:
             self.preview_canvas.configure(scrollregion=self.preview_canvas.bbox("all"))
@@ -1321,6 +1454,14 @@ class TextureManagerGUI:
             justify="center",
         )
         self.preview_label.grid(row=0, column=0, sticky="nsew")
+        self.preview_info_label = tk.Label(
+            self.preview_inner,
+            text="",
+            anchor="center",
+            justify="center",
+            font=(None, 9),
+        )
+        self.preview_info_label.grid(row=1, column=0, sticky="ew", pady=(4, 0))
         self.preview_image = None
         self.preview_source_image = None
 
@@ -1569,6 +1710,10 @@ class TextureManagerGUI:
         if hasattr(self.preview_label, "configure"):
             self.preview_label.configure(image="", text=message)
             self.preview_label.image = None
+        if hasattr(self, "preview_info_label") and hasattr(
+            self.preview_info_label, "configure"
+        ):
+            self.preview_info_label.configure(text="")
         self._update_preview_scrollregion(reset_position=True)
         self.preview_image = None
         self.preview_source_image = None
@@ -1734,10 +1879,12 @@ class TextureManagerGUI:
 
         format_hint = None
         detected_format = None
+        dds_info: Dict[str, object] | None = None
         try:
             stream = io.BytesIO(payload)
             if payload.startswith(b"DDS "):
                 format_hint = "DDS"
+                dds_info = _parse_dds_header(payload)
             image = Image.open(stream)
             image.load()
             detected_format = image.format
@@ -1763,6 +1910,33 @@ class TextureManagerGUI:
         self.preview_image = photo
         self._update_preview_scrollregion(reset_position=True)
         format_display = format_hint or detected_format or "unknown"
+        dds_label_text = ""
+        if dds_info:
+            compression = dds_info.get("compression")
+            channel_masks = dds_info.get("channel_masks") or {}
+            mask_parts = [
+                f"{channel}={int(channel_masks.get(channel, 0)):#010x}"
+                for channel in ("R", "G", "B", "A")
+            ]
+            mask_text = ", ".join(mask_parts) if mask_parts else ""
+            if compression:
+                format_display = f"DDS {compression}" + (
+                    f", {mask_text}" if mask_text else ""
+                )
+                info_sections = [str(compression)]
+            else:
+                format_display = f"DDS {mask_text}" if mask_text else "DDS"
+                info_sections = []
+            if mask_text:
+                info_sections.append(mask_text)
+            if info_sections:
+                dds_label_text = f"DDS • {' • '.join(info_sections)}"
+            else:
+                dds_label_text = "DDS"
+        if hasattr(self, "preview_info_label") and hasattr(
+            self.preview_info_label, "configure"
+        ):
+            self.preview_info_label.configure(text=dds_label_text)
         self._set_status(f"Previewing {entry['relative_path']} ({format_display})")
         self._update_channel_preview()
 
