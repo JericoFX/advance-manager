@@ -1241,14 +1241,19 @@ class TextureManagerGUI:
 
         control_frame = tk.Frame(list_frame)
         control_frame.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(4, 0))
-        control_frame.columnconfigure(0, weight=1)
-        control_frame.columnconfigure(1, weight=1)
+        control_frame.columnconfigure(0, weight=0)
+        control_frame.columnconfigure(1, weight=0)
+        control_frame.columnconfigure(2, weight=1)
         tk.Button(control_frame, text="Expand All", command=self._expand_all_nodes).grid(
             row=0, column=0, padx=2, sticky="ew"
         )
         tk.Button(control_frame, text="Collapse All", command=self._collapse_all_nodes).grid(
             row=0, column=1, padx=2, sticky="ew"
         )
+        self.search_var = tk.StringVar()
+        search_entry = tk.Entry(control_frame, textvariable=self.search_var)
+        search_entry.grid(row=0, column=2, padx=(8, 0), sticky="ew")
+        search_entry.bind("<KeyRelease>", self._apply_search_filter)
 
         preview_frame = tk.Frame(self.root, borderwidth=1, relief=tk.SUNKEN)
         preview_frame.grid(row=0, column=1, sticky="nsew", padx=(10, 10), pady=10)
@@ -1476,26 +1481,31 @@ class TextureManagerGUI:
         self._expand_all_on_refresh = False
 
     def _apply_search_filter(self, _event: object | None = None) -> None:
+        if not hasattr(self, "tree"):
+            return
+
         query = ""
         if hasattr(self, "search_var"):
             query = self.search_var.get().strip().lower()
 
-        previous_entries = list(self.entries)
+        selected_nodes = set()
+        focus_path = None
+        previous_last_activated = self.last_activated_path
+
         try:
-            selected_indices = self.listbox.curselection()
+            for node_id in self.tree.selection():
+                entry = self.node_to_entry.get(node_id)
+                if entry is not None:
+                    selected_nodes.add(entry["relative_path"])
         except tk.TclError:
-            selected_indices = ()
-        selected_paths = [
-            previous_entries[index]["relative_path"]
-            for index in selected_indices
-            if 0 <= index < len(previous_entries)
-        ]
-        active_path = None
-        if (
-            self.last_activated_index is not None
-            and 0 <= self.last_activated_index < len(previous_entries)
-        ):
-            active_path = previous_entries[self.last_activated_index]["relative_path"]
+            selected_nodes = set()
+
+        try:
+            focus_node = self.tree.focus()
+        except tk.TclError:
+            focus_node = ""
+        if focus_node in self.node_to_entry:
+            focus_path = self.node_to_entry[focus_node]["relative_path"]
 
         if not query:
             filtered = list(self.image_entries)
@@ -1513,41 +1523,59 @@ class TextureManagerGUI:
             self._clear_preview("No textures match the current search")
             return
 
-        restored_selection = False
-        if selected_paths:
-            new_indices = [
-                index
-                for index, entry in enumerate(filtered)
-                if entry["relative_path"] in selected_paths
-            ]
-            for index in new_indices:
+        restored_paths: List[str] = [
+            path for path in selected_nodes if path in self.entry_nodes
+        ]
+        if not restored_paths and focus_path and focus_path in self.entry_nodes:
+            restored_paths.append(focus_path)
+        if (
+            not restored_paths
+            and previous_last_activated
+            and previous_last_activated in self.entry_nodes
+        ):
+            restored_paths.append(previous_last_activated)
+
+        if restored_paths:
+            unique_paths: List[str] = []
+            seen: set[str] = set()
+            for path in restored_paths:
+                if path not in seen:
+                    seen.add(path)
+                    unique_paths.append(path)
+            node_ids = [self.entry_nodes[path] for path in unique_paths]
+            try:
+                self.tree.selection_set(node_ids)
+            except tk.TclError:
+                node_ids = []
+            focus_candidate = None
+            if focus_path and focus_path in self.entry_nodes:
+                focus_candidate = self.entry_nodes[focus_path]
+            elif (
+                previous_last_activated
+                and previous_last_activated in self.entry_nodes
+            ):
+                focus_candidate = self.entry_nodes[previous_last_activated]
+            elif node_ids:
+                focus_candidate = node_ids[-1]
+            if focus_candidate:
                 try:
-                    self.listbox.selection_set(index)
-                except tk.TclError:
-                    break
-            if new_indices:
-                try:
-                    if active_path is not None:
-                        active_index = next(
-                            idx
-                            for idx, entry in enumerate(filtered)
-                            if entry["relative_path"] == active_path
-                        )
-                    else:
-                        active_index = new_indices[-1]
-                except StopIteration:
-                    active_index = new_indices[-1]
-                try:
-                    self.listbox.activate(active_index)
+                    self.tree.focus(focus_candidate)
+                    self.tree.see(focus_candidate)
                 except tk.TclError:
                     pass
-                else:
-                    self.last_activated_index = active_index
-                self._on_entry_selected(None)
-                restored_selection = True
+            self._on_entry_selected(None)
+            return
 
-        if not restored_selection:
-            self._clear_preview()
+        try:
+            current_selection = self.tree.selection()
+        except tk.TclError:
+            current_selection = ()
+        if current_selection:
+            try:
+                self.tree.selection_remove(current_selection)
+            except tk.TclError:
+                pass
+        self._clear_preview()
 
     def _set_status(self, message: str) -> None:
         self.status.set(message)
@@ -1583,7 +1611,7 @@ class TextureManagerGUI:
     def _remember_last_active(self, event: object) -> None:
         if not hasattr(event, "y"):
             return
-        if not hasattr(self, "entry_tree"):
+        if not hasattr(self, "tree"):
             return
         try:
             node_id = self.tree.identify_row(event.y)
