@@ -42,7 +42,7 @@ import struct
 import threading
 import zlib
 from pathlib import Path
-from typing import Callable, Dict, Iterable, List, Sequence, Tuple
+from typing import Callable, Dict, Iterable, List, Sequence, Set, Tuple
 
 import copy
 
@@ -1164,6 +1164,11 @@ class TextureManagerGUI:
         self.replacements: Dict[str, bytes] = {}
         self.wrapper_info: Dict[str, object] | None = None
         self.layout_info: Dict[str, object] | None = None
+        self.node_to_entry: Dict[str, Dict[str, object]] = {}
+        self.entry_nodes: Dict[str, str] = {}
+        self.node_to_path: Dict[str, Tuple[str, ...]] = {}
+        self.last_activated_path: str | None = None
+        self._expand_all_on_refresh = False
 
         self._build_ui()
         self.root.protocol("WM_DELETE_WINDOW", self._shutdown)
@@ -1178,17 +1183,38 @@ class TextureManagerGUI:
         list_frame.grid(row=0, column=0, sticky="nsew")
 
         list_frame.rowconfigure(0, weight=1)
+        list_frame.rowconfigure(1, weight=0)
         list_frame.columnconfigure(0, weight=1)
 
-        self.listbox = tk.Listbox(list_frame, selectmode=tk.MULTIPLE)
-        self.listbox.grid(row=0, column=0, sticky="nsew")
-        self.listbox.bind("<<ListboxSelect>>", self._on_entry_selected)
-        self.listbox.bind("<ButtonRelease-1>", self._remember_last_active)
-        self.last_activated_index: int | None = None
+        self.tree = ttk.Treeview(
+            list_frame,
+            columns=("size",),
+            show="tree headings",
+            selectmode="extended",
+        )
+        self.tree.grid(row=0, column=0, sticky="nsew")
+        self.tree.heading("#0", text="Name", anchor="w")
+        self.tree.heading("size", text="Size", anchor="e")
+        self.tree.column("#0", anchor="w", stretch=True, width=360)
+        self.tree.column("size", anchor="e", stretch=False, width=140)
+        self.tree.bind("<<TreeviewSelect>>", self._on_entry_selected)
+        self.tree.bind("<ButtonRelease-1>", self._remember_last_active)
+        self.tree.tag_configure("modified", foreground="#d9534f")
 
-        scrollbar = tk.Scrollbar(list_frame, orient=tk.VERTICAL, command=self.listbox.yview)
+        scrollbar = tk.Scrollbar(list_frame, orient=tk.VERTICAL, command=self.tree.yview)
         scrollbar.grid(row=0, column=1, sticky="ns")
-        self.listbox.configure(yscrollcommand=scrollbar.set)
+        self.tree.configure(yscrollcommand=scrollbar.set)
+
+        control_frame = tk.Frame(list_frame)
+        control_frame.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(4, 0))
+        control_frame.columnconfigure(0, weight=1)
+        control_frame.columnconfigure(1, weight=1)
+        tk.Button(control_frame, text="Expand All", command=self._expand_all_nodes).grid(
+            row=0, column=0, padx=2, sticky="ew"
+        )
+        tk.Button(control_frame, text="Collapse All", command=self._collapse_all_nodes).grid(
+            row=0, column=1, padx=2, sticky="ew"
+        )
 
         preview_frame = tk.Frame(self.root, borderwidth=1, relief=tk.SUNKEN)
         preview_frame.grid(row=0, column=1, sticky="nsew", padx=(10, 10), pady=10)
@@ -1320,17 +1346,100 @@ class TextureManagerGUI:
 
     # ------------------------------------------------------------- utilities --
     def _refresh_list(self) -> None:
-        self.listbox.delete(0, tk.END)
+        if not hasattr(self, "tree"):
+            return
+
+        selected_paths = []
+        for node_id in self.tree.selection():
+            entry = self.node_to_entry.get(node_id)
+            if entry is not None:
+                selected_paths.append(entry["relative_path"])
+
+        if self._expand_all_on_refresh:
+            expanded_paths: Set[Tuple[str, ...]] | None = None
+        else:
+            expanded_paths = {
+                path
+                for node_id, path in self.node_to_path.items()
+                if path
+                and self.tree.exists(node_id)
+                and self.tree.item(node_id, "open")
+            }
+
+        children = self.tree.get_children("")
+        if children:
+            self.tree.delete(*children)
+
+        self.node_to_entry.clear()
+        self.entry_nodes.clear()
+        self.node_to_path.clear()
+
+        folder_nodes: Dict[Tuple[str, ...], str] = {(): ""}
+
+        def ensure_folder(path_segments: Sequence[str]) -> str:
+            key = tuple(path_segments)
+            if key in folder_nodes:
+                return folder_nodes[key]
+
+            parent_id = ensure_folder(path_segments[:-1]) if path_segments else ""
+            node_text = path_segments[-1]
+            path_tuple = tuple(path_segments)
+            should_open = self._expand_all_on_refresh or (
+                expanded_paths is not None and path_tuple in expanded_paths
+            )
+            node_id = self.tree.insert(
+                parent_id,
+                "end",
+                text=node_text,
+                values=("",),
+                open=should_open,
+            )
+            folder_nodes[key] = node_id
+            self.node_to_path[node_id] = path_tuple
+            return node_id
+
         for entry in self.entries:
-            display = f"{entry['relative_path']} ({entry['size']} bytes)"
-            replacement = self.replacements.get(entry["relative_path"])
+            relative_path = entry["relative_path"]
+            segments = [segment for segment in relative_path.split("/") if segment]
+            parent_segments = segments[:-1]
+            parent_id = ensure_folder(parent_segments) if parent_segments else ""
+            replacement = self.replacements.get(relative_path)
+            size_text = f"{entry['size']} bytes"
+            tags: Tuple[str, ...] = ()
+            name_display = segments[-1] if segments else relative_path
             if replacement is not None:
                 replacement_size = len(replacement)
                 if replacement_size != entry["size"]:
-                    display += f" → {replacement_size} bytes"
-                display += " *"
-            self.listbox.insert(tk.END, display)
-        self.last_activated_index = None
+                    size_text += f" → {replacement_size} bytes"
+                name_display += " *"
+                tags = ("modified",)
+            node_id = self.tree.insert(
+                parent_id,
+                "end",
+                text=name_display,
+                values=(size_text,),
+                tags=tags,
+            )
+            path_tuple = tuple(segments) if segments else (relative_path,)
+            self.node_to_entry[node_id] = entry
+            self.entry_nodes[relative_path] = node_id
+            self.node_to_path[node_id] = path_tuple
+
+        new_selection = [
+            self.entry_nodes[path]
+            for path in selected_paths
+            if path in self.entry_nodes
+        ]
+        if new_selection:
+            self.tree.selection_set(new_selection)
+            focus_node = new_selection[-1]
+            self.tree.focus(focus_node)
+            self.tree.see(focus_node)
+
+        if self.last_activated_path and self.last_activated_path not in self.entry_nodes:
+            self.last_activated_path = None
+
+        self._expand_all_on_refresh = False
 
     def _set_status(self, message: str) -> None:
         self.status.set(message)
@@ -1356,7 +1465,7 @@ class TextureManagerGUI:
         self.preview_image = None
         self.preview_source_image = None
         self._set_channel_controls_state("disabled")
-        self.last_activated_index = None
+        self.last_activated_path = None
 
     def _shutdown(self) -> None:
         _release_archive_buffer(self.archive_bytes)
@@ -1367,11 +1476,30 @@ class TextureManagerGUI:
         if not hasattr(event, "y"):
             return
         try:
-            index = self.listbox.nearest(event.y)
+            node_id = self.tree.identify_row(event.y)
         except tk.TclError:
             return
-        if 0 <= index < self.listbox.size():
-            self.last_activated_index = index
+        if node_id and node_id in self.node_to_entry:
+            entry = self.node_to_entry[node_id]
+            self.last_activated_path = entry["relative_path"]
+
+    def _expand_all_nodes(self) -> None:
+        for node_id, path in list(self.node_to_path.items()):
+            if not path or node_id in self.node_to_entry:
+                continue
+            try:
+                self.tree.item(node_id, open=True)
+            except tk.TclError:
+                continue
+
+    def _collapse_all_nodes(self) -> None:
+        for node_id, path in list(self.node_to_path.items()):
+            if not path or node_id in self.node_to_entry:
+                continue
+            try:
+                self.tree.item(node_id, open=False)
+            except tk.TclError:
+                continue
 
     def _export_entries(
         self, destination_path: Path, entries: Sequence[Dict[str, object]]
@@ -1436,8 +1564,10 @@ class TextureManagerGUI:
             self._clear_preview("Open an archive to preview textures")
             return
 
-        selection = self.listbox.curselection()
-        if not selection:
+        selected_nodes = [
+            node_id for node_id in self.tree.selection() if node_id in self.node_to_entry
+        ]
+        if not selected_nodes:
             self._clear_preview()
             return
 
@@ -1455,23 +1585,23 @@ class TextureManagerGUI:
             )
             return
 
-        try:
-            active_index = self.listbox.index(tk.ACTIVE)
-        except tk.TclError:
-            active_index = None
+        focus_node = self.tree.focus()
+        if focus_node not in selected_nodes:
+            focus_node = None
 
-        if active_index in selection:
-            index = active_index
-        elif (
-            self.last_activated_index is not None
-            and self.last_activated_index in selection
-        ):
-            index = self.last_activated_index
-        else:
-            index = selection[-1]
+        if focus_node is None and self.last_activated_path is not None:
+            candidate = self.entry_nodes.get(self.last_activated_path)
+            if candidate in selected_nodes:
+                focus_node = candidate
 
-        self.last_activated_index = index
-        entry = self.entries[index]
+        if focus_node is None:
+            focus_node = selected_nodes[-1]
+
+        self.tree.focus(focus_node)
+        self.tree.see(focus_node)
+
+        entry = self.node_to_entry[focus_node]
+        self.last_activated_path = entry["relative_path"]
         replacement = self.replacements.get(entry["relative_path"])
         if replacement is not None:
             payload = replacement
@@ -1554,6 +1684,7 @@ class TextureManagerGUI:
         self.replacements.clear()
         self.wrapper_info = wrapper
         self.layout_info = layout_info
+        self._expand_all_on_refresh = True
         self._refresh_list()
         self._clear_preview()
         self._set_status(
@@ -1565,8 +1696,10 @@ class TextureManagerGUI:
             messagebox.showwarning("No archive", "Open an archive before exporting.")
             return
 
-        indices = self.listbox.curselection()
-        if not indices:
+        node_ids = [
+            node_id for node_id in self.tree.selection() if node_id in self.node_to_entry
+        ]
+        if not node_ids:
             messagebox.showinfo("Nothing selected", "Select one or more entries to export.")
             return
 
@@ -1575,7 +1708,7 @@ class TextureManagerGUI:
             return
 
         destination_path = Path(destination)
-        entries = [self.entries[index] for index in indices]
+        entries = [self.node_to_entry[node_id] for node_id in node_ids]
         count, renamed = self._export_entries(destination_path, entries)
         rename_note = (
             f"; adjusted extensions for {len(renamed)} file(s)"
@@ -1610,16 +1743,17 @@ class TextureManagerGUI:
             messagebox.showwarning("No archive", "Open an archive before importing replacements.")
             return
 
-        indices = self.listbox.curselection()
-        if len(indices) != 1:
+        node_ids = [
+            node_id for node_id in self.tree.selection() if node_id in self.node_to_entry
+        ]
+        if len(node_ids) != 1:
             messagebox.showinfo(
                 "Select a texture",
                 "Choose a single texture entry before importing a replacement.",
             )
             return
 
-        entry_index = indices[0]
-        entry = self.entries[entry_index]
+        entry = self.node_to_entry[node_ids[0]]
         filename = filedialog.askopenfilename(
             title="Select replacement texture",
             filetypes=[
@@ -1638,13 +1772,12 @@ class TextureManagerGUI:
 
         self.replacements[entry["relative_path"]] = payload
         self._refresh_list()
-        try:
-            self.listbox.selection_set(entry_index)
-            self.listbox.activate(entry_index)
-        except tk.TclError:
-            pass
-        else:
-            self.last_activated_index = entry_index
+        node_id = self.entry_nodes.get(entry["relative_path"])
+        if node_id is not None:
+            self.tree.selection_set(node_id)
+            self.tree.focus(node_id)
+            self.tree.see(node_id)
+            self.last_activated_path = entry["relative_path"]
             self._on_entry_selected(None)
         self._set_status(
             f"Queued replacement for {entry['relative_path']} ({len(payload)} bytes)"
