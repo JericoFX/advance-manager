@@ -378,5 +378,60 @@ class PatchArchiveTests(unittest.TestCase):
                 rs._release_archive_buffer(archive_bytes)
 
 
+class ReplacementLogTests(unittest.TestCase):
+    def test_build_replacement_log_captures_metadata(self) -> None:
+        archive_path = Path("/tmp/archive.asr")
+        replacements = {
+            "textures/example.dds": {
+                "payload": b"IGNORED",
+                "offset": 12,
+                "size": 34,
+                "source_info": {
+                    "path": "/tmp/example.dds",
+                    "metadata_path": "/tmp/example.dds.rsmeta",
+                    "metadata": {"relative_path": "textures/example.dds"},
+                },
+            }
+        }
+
+        log_payload = rs.build_replacement_log(replacements, archive_path=archive_path)
+
+        self.assertEqual(log_payload.get("schema"), 1)
+        self.assertEqual(log_payload.get("archive"), str(archive_path))
+        self.assertIsInstance(log_payload.get("generated"), str)
+
+        replacements_list = log_payload.get("replacements")
+        self.assertIsInstance(replacements_list, list)
+        self.assertEqual(len(replacements_list), 1)
+
+        entry = replacements_list[0]
+        self.assertEqual(entry["relative_path"], "textures/example.dds")
+        self.assertEqual(entry["offset"], 12)
+        self.assertEqual(entry["size"], 34)
+        self.assertNotIn("payload", entry)
+        self.assertEqual(entry["source"]["path"], "/tmp/example.dds")
+        self.assertEqual(entry["source"]["metadata_path"], "/tmp/example.dds.rsmeta")
+        self.assertEqual(entry["metadata"], {"relative_path": "textures/example.dds"})
+
+    def test_write_replacement_log_creates_json_file(self) -> None:
+        replacements = {
+            "textures/sample.dds": {
+                "payload": b"data",
+                "source_info": {"path": "/tmp/sample.dds"},
+            }
+        }
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            patch_path = tmp / "sample_patch.asr"
+            patch_path.write_bytes(b"patch")
+
+            log_path = rs.write_replacement_log(patch_path, replacements)
+
+            self.assertTrue(log_path.exists())
+            payload = json.loads(log_path.read_text())
+            self.assertEqual(payload["replacements"][0]["relative_path"], "textures/sample.dds")
+
+
 if __name__ == "__main__":
     unittest.main()

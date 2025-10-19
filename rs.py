@@ -41,6 +41,7 @@ import shutil
 import struct
 import threading
 import zlib
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Sequence, Tuple
 
@@ -1278,6 +1279,71 @@ def write_patch_archive(
         _release_archive_buffer(archive_bytes)
 
 
+def build_replacement_log(
+    replacements: Dict[str, Dict[str, object]],
+    *,
+    archive_path: Path | None = None,
+) -> Dict[str, object]:
+    """Return a serialisable description of the queued replacements."""
+
+    entries: List[Dict[str, object]] = []
+
+    for relative_path, record in replacements.items():
+        if not isinstance(relative_path, str) or not relative_path:
+            continue
+
+        entry: Dict[str, object] = {"relative_path": relative_path}
+
+        source_info = record.get("source_info")
+        if isinstance(source_info, dict):
+            source_entry: Dict[str, object] = {}
+            path_value = source_info.get("path")
+            if isinstance(path_value, str) and path_value:
+                source_entry["path"] = path_value
+            metadata_path = source_info.get("metadata_path")
+            if isinstance(metadata_path, str) and metadata_path:
+                source_entry["metadata_path"] = metadata_path
+            if source_entry:
+                entry["source"] = source_entry
+
+            metadata = source_info.get("metadata")
+            if isinstance(metadata, dict):
+                entry["metadata"] = metadata
+
+        for numeric_key in ("offset", "size"):
+            numeric_value = record.get(numeric_key)
+            if isinstance(numeric_value, int):
+                entry[numeric_key] = int(numeric_value)
+
+        entries.append(entry)
+
+    log_payload: Dict[str, object] = {
+        "schema": 1,
+        "generated": datetime.utcnow().isoformat() + "Z",
+        "replacements": entries,
+    }
+
+    if archive_path is not None:
+        log_payload["archive"] = str(archive_path)
+
+    return log_payload
+
+
+def write_replacement_log(
+    patch_path: Path,
+    replacements: Dict[str, Dict[str, object]],
+    *,
+    archive_path: Path | None = None,
+) -> Path:
+    """Write a JSON log describing queued replacements next to ``patch_path``."""
+
+    log_payload = build_replacement_log(replacements, archive_path=archive_path)
+    log_path = patch_path.with_suffix(patch_path.suffix + ".replacements.json")
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_path.write_text(json.dumps(log_payload, indent=2, ensure_ascii=False))
+    return log_path
+
+
 def repack_archive(original_archive: Path, manifest_path: Path, modified_dir: Path, output_path: Path) -> None:
     """Create a patched copy of the archive using files stored on disk."""
 
@@ -1512,15 +1578,16 @@ class TextureManagerGUI:
         tk.Button(button_frame, text="Create Patch", command=self.create_patch_archive).grid(
             row=0, column=4, padx=4
         )
-        tk.Button(button_frame, text="Save Patched Archive", command=self.save_patched_archive).grid(
-            row=0, column=5, padx=4
-        )
+        tk.Button(
+            button_frame,
+            text="Load Modification Log",
+            command=self.load_replacement_log,
+        ).grid(row=0, column=5, padx=4)
 
         self.status = tk.StringVar(
             value=(
                 "Select an archive to begin. "
-                "'Save Patched Archive' writes a full copy while "
-                "'Create Patch' exports only modified files."
+                "'Create Patch' exports only modified files and writes a reusable log."
             )
         )
         status_bar = tk.Label(self.root, textvariable=self.status, anchor="w")
@@ -2258,6 +2325,138 @@ class TextureManagerGUI:
             f"Queued replacement for {entry['relative_path']} ({len(payload)} bytes){metadata_note}"
         )
 
+    def load_replacement_log(self) -> None:
+        if self.archive_bytes is None:
+            messagebox.showwarning(
+                "No archive", "Open an archive before loading a modification log."
+            )
+            return
+
+        filename = filedialog.askopenfilename(
+            title="Select modification log",
+            filetypes=[("Modification logs", "*.replacements.json *.json"), ("All files", "*.*")],
+        )
+        if not filename:
+            return
+
+        log_path = Path(filename)
+        try:
+            log_data = json.loads(log_path.read_text())
+        except Exception as exc:  # pragma: no cover - GUI path
+            messagebox.showerror("Unable to read log", str(exc))
+            return
+
+        replacements_info = log_data.get("replacements")
+        if not isinstance(replacements_info, list) or not replacements_info:
+            messagebox.showinfo(
+                "No replacements", "The selected log does not include any replacements."
+            )
+            return
+
+        entry_index = {
+            entry.get("relative_path"): entry
+            for entry in getattr(self, "entries", [])
+            if isinstance(entry.get("relative_path"), str)
+        }
+
+        loaded_paths: List[str] = []
+        errors: List[str] = []
+
+        for info in replacements_info:
+            if not isinstance(info, dict):
+                continue
+            relative_path = info.get("relative_path")
+            if not isinstance(relative_path, str) or not relative_path:
+                continue
+
+            entry = entry_index.get(relative_path)
+            if entry is None:
+                errors.append(f"{relative_path}: entry not present in the opened archive")
+                continue
+
+            source = info.get("source") or {}
+            source_path_value = source.get("path") if isinstance(source, dict) else None
+            if not isinstance(source_path_value, str) or not source_path_value:
+                errors.append(f"{relative_path}: no source path recorded in the log")
+                continue
+
+            source_path = Path(source_path_value)
+            if not source_path.exists():
+                errors.append(f"{relative_path}: {source_path} does not exist")
+                continue
+
+            try:
+                payload = source_path.read_bytes()
+            except Exception as exc:  # pragma: no cover - GUI path
+                errors.append(f"{relative_path}: unable to read {source_path}: {exc}")
+                continue
+
+            metadata: Dict[str, object] | None = None
+            metadata_path_value = None
+            if isinstance(source, dict):
+                metadata_path_candidate = source.get("metadata_path")
+                if isinstance(metadata_path_candidate, str) and metadata_path_candidate:
+                    metadata_path_value = metadata_path_candidate
+            if isinstance(info.get("metadata"), dict):
+                metadata = info["metadata"]  # type: ignore[assignment]
+            elif metadata_path_value:
+                metadata_path = Path(metadata_path_value)
+                if metadata_path.exists():
+                    try:
+                        metadata = json.loads(metadata_path.read_text())
+                    except Exception:  # pragma: no cover - GUI path
+                        metadata = None
+
+            replacement_record: Dict[str, object] = {
+                "payload": payload,
+                "source_info": {"path": str(source_path)},
+            }
+            if metadata_path_value:
+                replacement_record["source_info"]["metadata_path"] = metadata_path_value
+            if isinstance(metadata, dict):
+                replacement_record["source_info"]["metadata"] = metadata
+
+            for numeric_key in ("offset", "size"):
+                numeric_value = info.get(numeric_key)
+                if isinstance(numeric_value, int):
+                    replacement_record[numeric_key] = int(numeric_value)
+
+            self.replacements[relative_path] = replacement_record
+            loaded_paths.append(relative_path)
+
+        if not loaded_paths:
+            messagebox.showinfo(
+                "No replacements loaded",
+                "None of the logged replacements could be imported.",
+            )
+            if errors:
+                messagebox.showwarning(
+                    "Replacements skipped",
+                    "\n".join(errors[:10]) + ("\n…" if len(errors) > 10 else ""),
+                )
+            return
+
+        self._refresh_list()
+
+        first_path = loaded_paths[0]
+        node_id = self.entry_nodes.get(first_path)
+        if node_id is not None:
+            self.tree.selection_set(node_id)
+            self.tree.focus(node_id)
+            self.tree.see(node_id)
+            self.last_activated_path = first_path
+            self._on_entry_selected(None)
+
+        self._set_status(
+            f"Loaded {len(loaded_paths)} replacement(s) from {log_path.name}"
+        )
+
+        if errors:
+            messagebox.showwarning(
+                "Some replacements skipped",
+                "\n".join(errors[:10]) + ("\n…" if len(errors) > 10 else ""),
+            )
+
     def _ask_patch_destination(
         self,
         archive_output: Path,
@@ -2370,16 +2569,40 @@ class TextureManagerGUI:
             return
 
         count = len(written)
-        self._set_status(
+        logged_replacements = {
+            rel_path: pending_replacements[rel_path]
+            for rel_path in written
+            if rel_path in pending_replacements
+        }
+        log_path = None
+        log_error = None
+        if logged_replacements:
+            try:
+                log_path = write_replacement_log(
+                    patch_destination,
+                    logged_replacements,
+                    archive_path=self.archive_path,
+                )
+            except Exception as exc:  # pragma: no cover - GUI path
+                log_error = str(exc)
+
+        status_parts = [
             f"Patch archive written to {patch_destination} ({count} file(s))"
-        )
-        messagebox.showinfo(
-            "Patch archive saved",
-            (
-                f"Patch archive written to {patch_destination} ({count} file(s))\n"
-                "Use 'Save Patched Archive' to write the full archive if you need a complete file."
-            ),
-        )
+        ]
+        if log_path is not None:
+            status_parts.append(f"log saved to {log_path.name}")
+        self._set_status("; ".join(status_parts))
+
+        message_lines = [status_parts[0]]
+        if log_path is not None:
+            message_lines.append(f"Modification log saved to {log_path}")
+        if log_error is not None:
+            message_lines.append(f"Could not save modification log: {log_error}")
+
+        messagebox.showinfo("Patch archive saved", "\n".join(message_lines))
+
+        if log_error is not None:
+            messagebox.showwarning("Modification log not saved", log_error)
 
     def save_patched_archive(self) -> None:
         if self.archive_bytes is None or self.archive_path is None:
