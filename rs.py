@@ -1182,20 +1182,34 @@ class TextureManagerGUI:
         list_frame.rowconfigure(1, weight=1)
         list_frame.columnconfigure(0, weight=1)
 
-        self.search_var = tk.StringVar()
-        search_entry = tk.Entry(list_frame, textvariable=self.search_var)
-        search_entry.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 4))
-        search_entry.bind("<KeyRelease>", self._apply_search_filter)
+        self.style = ttk.Style(self.root)
+        self.style.configure("Modified.Treeview", foreground="#d35400")
+        modified_color = self.style.lookup("Modified.Treeview", "foreground") or "#d35400"
 
-        self.listbox = tk.Listbox(list_frame, selectmode=tk.MULTIPLE)
-        self.listbox.grid(row=1, column=0, sticky="nsew")
-        self.listbox.bind("<<ListboxSelect>>", self._on_entry_selected)
-        self.listbox.bind("<ButtonRelease-1>", self._remember_last_active)
+        self.entry_tree = ttk.Treeview(
+            list_frame,
+            columns=(),
+            show="tree",
+            selectmode="extended",
+        )
+        self.entry_tree.heading("#0", text="Textures")
+        self.entry_tree.grid(row=0, column=0, sticky="nsew")
+        self.entry_tree.bind("<<TreeviewSelect>>", self._on_entry_selected)
+        self.entry_tree.bind("<ButtonRelease-1>", self._remember_last_active)
+        self.entry_tree.tag_configure("modified", foreground=modified_color)
         self.last_activated_index: int | None = None
 
-        scrollbar = tk.Scrollbar(list_frame, orient=tk.VERTICAL, command=self.listbox.yview)
-        scrollbar.grid(row=1, column=1, sticky="ns")
-        self.listbox.configure(yscrollcommand=scrollbar.set)
+        scrollbar = ttk.Scrollbar(list_frame, orient=tk.VERTICAL, command=self.entry_tree.yview)
+        scrollbar.grid(row=0, column=1, sticky="ns")
+        self.entry_tree.configure(yscrollcommand=scrollbar.set)
+
+        legend_text = "Entries shown in orange have pending replacements."
+        self.legend_label = ttk.Label(
+            list_frame,
+            text=legend_text,
+            foreground=modified_color,
+        )
+        self.legend_label.grid(row=1, column=0, columnspan=2, sticky="w", pady=(4, 0))
 
         preview_frame = tk.Frame(self.root, borderwidth=1, relief=tk.SUNKEN)
         preview_frame.grid(row=0, column=1, sticky="nsew", padx=(10, 10), pady=10)
@@ -1327,16 +1341,22 @@ class TextureManagerGUI:
 
     # ------------------------------------------------------------- utilities --
     def _refresh_list(self) -> None:
-        self.listbox.delete(0, tk.END)
-        for entry in self.entries:
+        if not hasattr(self, "entry_tree"):
+            return
+
+        for item in self.entry_tree.get_children():
+            self.entry_tree.delete(item)
+
+        for index, entry in enumerate(self.entries):
             display = f"{entry['relative_path']} ({entry['size']} bytes)"
+            tags: Tuple[str, ...] = ()
             replacement = self.replacements.get(entry["relative_path"])
             if replacement is not None:
                 replacement_size = len(replacement)
                 if replacement_size != entry["size"]:
                     display += f" → {replacement_size} bytes"
-                display += " *"
-            self.listbox.insert(tk.END, display)
+                tags = ("modified",)
+            self.entry_tree.insert("", tk.END, iid=str(index), text=display, tags=tags)
         self.last_activated_index = None
 
     def _apply_search_filter(self, _event: object | None = None) -> None:
@@ -1447,12 +1467,18 @@ class TextureManagerGUI:
     def _remember_last_active(self, event: object) -> None:
         if not hasattr(event, "y"):
             return
+        if not hasattr(self, "entry_tree"):
+            return
         try:
-            index = self.listbox.nearest(event.y)
+            iid = self.entry_tree.identify_row(event.y)
         except tk.TclError:
             return
-        if 0 <= index < self.listbox.size():
-            self.last_activated_index = index
+        if not iid:
+            return
+        try:
+            self.last_activated_index = int(iid)
+        except (TypeError, ValueError):
+            self.last_activated_index = None
 
     def _export_entries(
         self, destination_path: Path, entries: Sequence[Dict[str, object]]
@@ -1517,7 +1543,10 @@ class TextureManagerGUI:
             self._clear_preview("Open an archive to preview textures")
             return
 
-        selection = self.listbox.curselection()
+        if not hasattr(self, "entry_tree"):
+            return
+
+        selection = self.entry_tree.selection()
         if not selection:
             self._clear_preview()
             return
@@ -1537,19 +1566,28 @@ class TextureManagerGUI:
             return
 
         try:
-            active_index = self.listbox.index(tk.ACTIVE)
+            focus_item = self.entry_tree.focus()
         except tk.TclError:
-            active_index = None
+            focus_item = ""
 
-        if active_index in selection:
-            index = active_index
+        if focus_item in selection:
+            selected_iid = focus_item
         elif (
             self.last_activated_index is not None
-            and self.last_activated_index in selection
+            and str(self.last_activated_index) in selection
         ):
-            index = self.last_activated_index
+            selected_iid = str(self.last_activated_index)
         else:
-            index = selection[-1]
+            selected_iid = selection[-1]
+
+        try:
+            index = int(selected_iid)
+        except (TypeError, ValueError):
+            try:
+                index = int(selection[-1])
+            except (TypeError, ValueError):
+                self._clear_preview()
+                return
 
         self.last_activated_index = index
         entry = self.entries[index]
@@ -1649,7 +1687,13 @@ class TextureManagerGUI:
             messagebox.showwarning("No archive", "Open an archive before exporting.")
             return
 
-        indices = self.listbox.curselection()
+        if not hasattr(self, "entry_tree"):
+            return
+
+        try:
+            indices = sorted(int(iid) for iid in self.entry_tree.selection())
+        except (TypeError, ValueError):
+            indices = []
         if not indices:
             messagebox.showinfo("Nothing selected", "Select one or more entries to export.")
             return
@@ -1694,15 +1738,25 @@ class TextureManagerGUI:
             messagebox.showwarning("No archive", "Open an archive before importing replacements.")
             return
 
-        indices = self.listbox.curselection()
-        if len(indices) != 1:
+        if not hasattr(self, "entry_tree"):
+            return
+
+        selection = self.entry_tree.selection()
+        if len(selection) != 1:
             messagebox.showinfo(
                 "Select a texture",
                 "Choose a single texture entry before importing a replacement.",
             )
             return
 
-        entry_index = indices[0]
+        try:
+            entry_index = int(selection[0])
+        except (TypeError, ValueError):
+            messagebox.showinfo(
+                "Select a texture",
+                "Choose a single texture entry before importing a replacement.",
+            )
+            return
         entry = self.entries[entry_index]
         filename = filedialog.askopenfilename(
             title="Select replacement texture",
@@ -1723,8 +1777,10 @@ class TextureManagerGUI:
         self.replacements[entry["relative_path"]] = payload
         self._refresh_list()
         try:
-            self.listbox.selection_set(entry_index)
-            self.listbox.activate(entry_index)
+            iid = str(entry_index)
+            self.entry_tree.selection_set(iid)
+            self.entry_tree.focus(iid)
+            self.entry_tree.see(iid)
         except tk.TclError:
             pass
         else:
