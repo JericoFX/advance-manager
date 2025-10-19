@@ -1,3 +1,4 @@
+import copy
 import json
 import struct
 import sys
@@ -12,6 +13,7 @@ from rs import (
     _apply_replacements,
     _release_archive_buffer,
     extract_archive,
+    is_image_entry,
     load_archive,
     repack_archive,
 )
@@ -196,6 +198,30 @@ class RSCFReplacementTests(unittest.TestCase):
 
         return bytes(archive), entries
 
+    def _build_mixed_archive(self) -> tuple[bytes, list[dict]]:
+        chunks = []
+        entries = []
+        for name, payload in (
+            ("textures/gui_texture.tga", b"AAAA"),
+            ("data/non_texture.bin", b"BBBB"),
+        ):
+            chunk, entry = self._build_chunk(name, payload)
+            offset = sum(len(existing) for existing, _ in chunks)
+            adjusted = dict(entry)
+            adjusted["chunk_offset"] = offset + entry["chunk_offset"]
+            adjusted["header_offset"] = offset + entry["header_offset"]
+            adjusted["offset"] = offset + entry["offset"]
+            adjusted["offset_anchor"] = adjusted["offset"]
+            chunks.append((chunk, adjusted))
+            entries.append(adjusted)
+
+        archive = bytearray()
+        for chunk, _ in chunks:
+            archive.extend(chunk)
+        archive.extend(b"TAIL")
+
+        return bytes(archive), entries
+
     def test_apply_replacements_resizes_rscf_chunks(self) -> None:
         archive, entries = self._build_archive()
         original_first = dict(entries[0])
@@ -256,6 +282,69 @@ class RSCFReplacementTests(unittest.TestCase):
         self.assertEqual(second["offset"], original_second["offset"] + delta)
         self.assertEqual(updated[first["offset"] : first["offset"] + len(new_payload)], new_payload)
         self.assertTrue(updated.endswith(b"TAIL"))
+
+    def test_gui_flow_updates_following_non_image_entries(self) -> None:
+        archive, entries = self._build_mixed_archive()
+
+        all_entries = copy.deepcopy(entries)
+        visible_entries = [
+            entry for entry in all_entries if is_image_entry(entry["relative_path"])
+        ]
+        self.assertEqual(len(visible_entries), 1, "expected a single texture entry")
+
+        texture_entry = visible_entries[0]
+        non_texture_entry = next(
+            entry for entry in all_entries if not is_image_entry(entry["relative_path"])
+        )
+        original_non_texture = dict(non_texture_entry)
+
+        new_payload = b"AAAA" + b"ZZZZ"
+        replacements = {texture_entry["relative_path"]: new_payload}
+
+        staged_entries = copy.deepcopy(all_entries)
+        updated_bytes, updated_entries = _apply_replacements(
+            archive, staged_entries, replacements
+        )
+
+        updated_texture = next(
+            entry for entry in updated_entries if entry["relative_path"] == texture_entry["relative_path"]
+        )
+        updated_non_texture = next(
+            entry
+            for entry in updated_entries
+            if entry["relative_path"] == non_texture_entry["relative_path"]
+        )
+
+        delta = len(new_payload) - texture_entry["size"]
+        self.assertEqual(updated_texture["size"], len(new_payload))
+        self.assertEqual(
+            updated_bytes[updated_texture["offset"] : updated_texture["offset"] + len(new_payload)],
+            new_payload,
+        )
+        self.assertEqual(
+            updated_non_texture["chunk_offset"],
+            original_non_texture["chunk_offset"] + delta,
+        )
+        self.assertEqual(
+            updated_non_texture["offset"],
+            original_non_texture["offset"] + delta,
+        )
+        self.assertEqual(
+            updated_non_texture["offset_anchor"],
+            original_non_texture["offset_anchor"] + delta,
+        )
+        self.assertEqual(
+            updated_non_texture["header_offset"],
+            original_non_texture["header_offset"] + delta,
+        )
+
+        filtered_after_save = [
+            entry
+            for entry in updated_entries
+            if is_image_entry(entry["relative_path"])
+        ]
+        self.assertEqual(filtered_after_save, [updated_texture])
+        self.assertTrue(updated_bytes.endswith(b"TAIL"))
 
 if __name__ == "__main__":
     unittest.main()
