@@ -42,7 +42,7 @@ import struct
 import threading
 import zlib
 from pathlib import Path
-from typing import Callable, Dict, Iterable, List, Sequence, Set, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Sequence, Tuple
 
 import copy
 
@@ -705,12 +705,43 @@ def extract_archive(archive_path: Path, output_dir: Path) -> Path:
         _release_archive_buffer(data)
 
 
+def _extract_replacement_payload(value: object) -> bytes | None:
+    """Return the payload bytes stored in *value* if available."""
+
+    payload: Any
+    if isinstance(value, dict):
+        payload = value.get("payload")
+    else:
+        payload = value
+
+    if isinstance(payload, (bytes, bytearray)):
+        return bytes(payload)
+
+    return None
+
+
+def _normalise_replacement_payloads(
+    replacements: Dict[str, object]
+) -> Dict[str, bytes]:
+    """Return a mapping with raw byte payloads extracted from replacements."""
+
+    normalised: Dict[str, bytes] = {}
+    for rel_path, value in replacements.items():
+        payload = _extract_replacement_payload(value)
+        if payload is not None:
+            normalised[rel_path] = payload
+
+    return normalised
+
+
 def _apply_replacements(
     archive_bytes: bytes | mmap.mmap,
     entries: List[Dict[str, object]],
-    replacements: Dict[str, bytes],
+    replacements: Dict[str, object],
 ) -> Tuple[bytearray, List[Dict[str, object]]]:
     """Return a new archive with the requested replacements applied."""
+
+    resolved_replacements = _normalise_replacement_payloads(replacements)
 
     updated = bytearray(archive_bytes)
     # The RSFL table typically stores offsets relative to either the chunk start
@@ -718,7 +749,7 @@ def _apply_replacements(
     # used for the original entry so we can preserve the same addressing mode.
     for entry in entries:
         rel_path = entry["relative_path"]
-        payload = replacements.get(rel_path)
+        payload = resolved_replacements.get(rel_path)
         if payload is None:
             continue
 
@@ -1024,7 +1055,7 @@ def _build_rsfl_patch(
 
 def generate_patch_archive(
     manifest: Dict[str, object],
-    replacements: Dict[str, bytes],
+    replacements: Dict[str, object],
     *,
     archive_bytes: bytes | mmap.mmap | None = None,
     original_entries: Sequence[Dict[str, object]] | None = None,
@@ -1048,7 +1079,9 @@ def generate_patch_archive(
     )
 
     patch_entries: List[Tuple[Dict[str, object], bytes]] = []
-    for rel_path, payload in replacements.items():
+    normalised = _normalise_replacement_payloads(replacements)
+
+    for rel_path, payload in normalised.items():
         manifest_entry = manifest_index.get(rel_path)
         if manifest_entry is None:
             continue
@@ -1160,8 +1193,9 @@ class TextureManagerGUI:
         self.archive_path: Path | None = None
         self.archive_bytes: bytes | mmap.mmap | None = None
         self.all_entries: List[Dict[str, object]] = []
+        self.image_entries: List[Dict[str, object]] = []
         self.entries: List[Dict[str, object]] = []
-        self.replacements: Dict[str, bytes] = {}
+        self.replacements: Dict[str, Dict[str, object]] = {}
         self.wrapper_info: Dict[str, object] | None = None
         self.layout_info: Dict[str, object] | None = None
         self.node_to_entry: Dict[str, Dict[str, object]] = {}
@@ -1441,6 +1475,80 @@ class TextureManagerGUI:
 
         self._expand_all_on_refresh = False
 
+    def _apply_search_filter(self, _event: object | None = None) -> None:
+        query = ""
+        if hasattr(self, "search_var"):
+            query = self.search_var.get().strip().lower()
+
+        previous_entries = list(self.entries)
+        try:
+            selected_indices = self.listbox.curselection()
+        except tk.TclError:
+            selected_indices = ()
+        selected_paths = [
+            previous_entries[index]["relative_path"]
+            for index in selected_indices
+            if 0 <= index < len(previous_entries)
+        ]
+        active_path = None
+        if (
+            self.last_activated_index is not None
+            and 0 <= self.last_activated_index < len(previous_entries)
+        ):
+            active_path = previous_entries[self.last_activated_index]["relative_path"]
+
+        if not query:
+            filtered = list(self.image_entries)
+        else:
+            filtered = [
+                entry
+                for entry in self.image_entries
+                if query in entry["relative_path"].lower()
+            ]
+
+        self.entries = filtered
+        self._refresh_list()
+
+        if not filtered:
+            self._clear_preview("No textures match the current search")
+            return
+
+        restored_selection = False
+        if selected_paths:
+            new_indices = [
+                index
+                for index, entry in enumerate(filtered)
+                if entry["relative_path"] in selected_paths
+            ]
+            for index in new_indices:
+                try:
+                    self.listbox.selection_set(index)
+                except tk.TclError:
+                    break
+            if new_indices:
+                try:
+                    if active_path is not None:
+                        active_index = next(
+                            idx
+                            for idx, entry in enumerate(filtered)
+                            if entry["relative_path"] == active_path
+                        )
+                    else:
+                        active_index = new_indices[-1]
+                except StopIteration:
+                    active_index = new_indices[-1]
+                try:
+                    self.listbox.activate(active_index)
+                except tk.TclError:
+                    pass
+                else:
+                    self.last_activated_index = active_index
+                self._on_entry_selected(None)
+                restored_selection = True
+
+        if not restored_selection:
+            self._clear_preview()
+
     def _set_status(self, message: str) -> None:
         self.status.set(message)
 
@@ -1475,6 +1583,8 @@ class TextureManagerGUI:
     def _remember_last_active(self, event: object) -> None:
         if not hasattr(event, "y"):
             return
+        if not hasattr(self, "entry_tree"):
+            return
         try:
             node_id = self.tree.identify_row(event.y)
         except tk.TclError:
@@ -1506,6 +1616,7 @@ class TextureManagerGUI:
     ) -> Tuple[int, List[Tuple[str, str]]]:
         count = 0
         renamed: List[Tuple[str, str]] = []
+        source_archive = self.archive_path.name if self.archive_path else None
         for entry in entries:
             payload = self.archive_bytes[entry["offset"] : entry["offset"] + entry["size"]]
             relative_path = entry["relative_path"]
@@ -1518,6 +1629,15 @@ class TextureManagerGUI:
             target = destination_path / relative_target
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(payload)
+            metadata = {
+                "relative_path": relative_path,
+                "offset": int(entry.get("offset", 0)),
+                "size": int(entry.get("size", 0)),
+            }
+            if source_archive:
+                metadata["source_archive"] = source_archive
+            metadata_path = target.with_name(target.name + ".rsmeta")
+            metadata_path.write_text(json.dumps(metadata, indent=2))
             if original_relative is not None:
                 renamed.append((original_relative, export_relative))
             count += 1
@@ -1680,7 +1800,8 @@ class TextureManagerGUI:
         self.archive_path = Path(filename)
         self.archive_bytes = data
         self.all_entries = all_entries
-        self.entries = image_entries
+        self.image_entries = image_entries
+        self.entries = list(self.image_entries)
         self.replacements.clear()
         self.wrapper_info = wrapper
         self.layout_info = layout_info
@@ -1688,7 +1809,7 @@ class TextureManagerGUI:
         self._refresh_list()
         self._clear_preview()
         self._set_status(
-            f"Loaded {len(image_entries)} image entries from {self.archive_path.name}"
+            f"Loaded {len(self.image_entries)} image entries from {self.archive_path.name}"
         )
 
     def export_selected(self) -> None:
@@ -1715,7 +1836,10 @@ class TextureManagerGUI:
             if renamed
             else ""
         )
-        self._set_status(f"Exported {count} file(s) to {destination_path}{rename_note}")
+        metadata_note = "; created .rsmeta metadata files to re-import without browsing the tree"
+        self._set_status(
+            f"Exported {count} file(s) to {destination_path}{rename_note}{metadata_note}"
+        )
 
     def export_all(self) -> None:
         if self.archive_bytes is None:
@@ -1736,7 +1860,10 @@ class TextureManagerGUI:
             if renamed
             else ""
         )
-        self._set_status(f"Exported {count} file(s) to {destination_path}{rename_note}")
+        metadata_note = "; created .rsmeta metadata files to re-import without browsing the tree"
+        self._set_status(
+            f"Exported {count} file(s) to {destination_path}{rename_note}{metadata_note}"
+        )
 
     def import_replacement(self) -> None:
         if self.archive_bytes is None:
@@ -1749,7 +1876,7 @@ class TextureManagerGUI:
         if len(node_ids) != 1:
             messagebox.showinfo(
                 "Select a texture",
-                "Choose a single texture entry before importing a replacement.",
+                "Choose at most one texture entry before importing a replacement.",
             )
             return
 
@@ -1764,13 +1891,86 @@ class TextureManagerGUI:
         if not filename:
             return
 
+        source_path = Path(filename)
         try:
-            payload = Path(filename).read_bytes()
+            payload = source_path.read_bytes()
         except Exception as exc:  # pragma: no cover - GUI path
             messagebox.showerror("Unable to read texture", str(exc))
             return
 
-        self.replacements[entry["relative_path"]] = payload
+        source_info: Dict[str, object] = {"path": str(source_path)}
+        metadata = None
+        metadata_path = source_path.with_name(source_path.name + ".rsmeta")
+        if not metadata_path.exists():
+            alternate_metadata = source_path.with_suffix(".rsmeta")
+            if alternate_metadata.exists():
+                metadata_path = alternate_metadata
+
+        if metadata_path.exists():
+            try:
+                metadata = json.loads(metadata_path.read_text())
+            except Exception as exc:  # pragma: no cover - GUI path
+                messagebox.showwarning(
+                    "Metadata not loaded",
+                    (
+                        f"Could not read metadata from {metadata_path.name}: {exc}.\n"
+                        "The file will be imported using the currently selected entry."
+                    ),
+                )
+            else:
+                source_info["metadata_path"] = str(metadata_path)
+                source_info["metadata"] = metadata
+
+        entry_index = initial_entry_index
+        entry = self.entries[entry_index] if entry_index is not None else None
+        metadata_note = ""
+
+        if isinstance(metadata, dict):
+            meta_relative = metadata.get("relative_path")
+            if isinstance(meta_relative, str) and meta_relative:
+                resolved_index = next(
+                    (
+                        idx
+                        for idx, candidate in enumerate(self.entries)
+                        if candidate.get("relative_path") == meta_relative
+                    ),
+                    None,
+                )
+                if resolved_index is None:
+                    messagebox.showwarning(
+                        "Entry not found",
+                        (
+                            "The metadata references a texture that is not present in the opened archive:\n"
+                            f"{meta_relative}\n"
+                            "Select the desired entry manually to proceed."
+                        ),
+                    )
+                else:
+                    entry_index = resolved_index
+                    entry = self.entries[entry_index]
+                    metadata_note = f" using metadata from {metadata_path.name}"
+            else:
+                messagebox.showwarning(
+                    "Incomplete metadata",
+                    (
+                        f"Metadata file {metadata_path.name} does not include a valid relative_path.\n"
+                        "The current selection will be used instead."
+                    ),
+                )
+
+        if entry is None:
+            messagebox.showinfo(
+                "Select a texture",
+                "Choose a texture entry or use an export-generated metadata file to import automatically.",
+            )
+            return
+
+        source_info["resolved_relative_path"] = entry["relative_path"]
+
+        self.replacements[entry["relative_path"]] = {
+            "payload": payload,
+            "source_info": source_info,
+        }
         self._refresh_list()
         node_id = self.entry_nodes.get(entry["relative_path"])
         if node_id is not None:
@@ -1780,7 +1980,7 @@ class TextureManagerGUI:
             self.last_activated_path = entry["relative_path"]
             self._on_entry_selected(None)
         self._set_status(
-            f"Queued replacement for {entry['relative_path']} ({len(payload)} bytes)"
+            f"Queued replacement for {entry['relative_path']} ({len(payload)} bytes){metadata_note}"
         )
 
     def _ask_patch_destination(
@@ -1823,7 +2023,7 @@ class TextureManagerGUI:
     def _create_patch_archive(
         self,
         patch_path: Path,
-        replacements: Dict[str, bytes],
+        replacements: Dict[str, object],
         *,
         archive_bytes: bytes | mmap.mmap | None = None,
         entries: Sequence[Dict[str, object]] | None = None,
@@ -1997,13 +2197,14 @@ class TextureManagerGUI:
                 _release_archive_buffer(previous_buffer)
                 self.archive_bytes = new_archive_bytes
                 self.all_entries = updated_entries
-                self.entries = [
+                self.image_entries = [
                     entry
                     for entry in updated_entries
                     if is_image_entry(entry["relative_path"])
                 ]
+                self.entries = list(self.image_entries)
                 self.replacements.clear()
-                self._refresh_list()
+                self._apply_search_filter()
                 self._set_status(f"Saved patched archive to {output_path}")
                 messagebox.showinfo(
                     "Archive saved", f"Patched archive written to {output_path}"
