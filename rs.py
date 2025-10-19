@@ -1354,14 +1354,16 @@ class TextureManagerGUI:
 
         self.tree = ttk.Treeview(
             list_frame,
-            columns=("size",),
+            columns=("status", "size"),
             show="tree headings",
             selectmode="extended",
         )
         self.tree.grid(row=0, column=0, sticky="nsew")
         self.tree.heading("#0", text="Name", anchor="w")
+        self.tree.heading("status", text="Status", anchor="w")
         self.tree.heading("size", text="Size", anchor="e")
         self.tree.column("#0", anchor="w", stretch=True, width=360)
+        self.tree.column("status", anchor="w", stretch=False, width=140)
         self.tree.column("size", anchor="e", stretch=False, width=140)
         self.tree.bind("<<TreeviewSelect>>", self._on_entry_selected)
         self.tree.bind("<ButtonRelease-1>", self._remember_last_active)
@@ -1585,6 +1587,7 @@ class TextureManagerGUI:
             parent_id = ensure_folder(parent_segments) if parent_segments else ""
             replacement = self.replacements.get(relative_path)
             size_text = f"{entry['size']} bytes"
+            status_text = ""
             tags: Tuple[str, ...] = ()
             name_display = segments[-1] if segments else relative_path
             if replacement is not None:
@@ -1593,15 +1596,28 @@ class TextureManagerGUI:
                     replacement_size = len(replacement_payload)
                     if replacement_size != entry["size"]:
                         size_text += f" → {replacement_size} bytes"
+                    else:
+                        size_text += " → replacement"
                 else:
                     size_text += " → (missing payload)"
                 name_display += " *"
                 tags = ("modified",)
+                status_parts: List[str] = ["Modified"]
+                if isinstance(replacement, dict):
+                    source_info = replacement.get("source_info")
+                    if isinstance(source_info, dict):
+                        if isinstance(source_info.get("metadata"), dict):
+                            status_parts.append("rsmeta")
+                        elif isinstance(source_info.get("path"), str):
+                            origin_name = os.path.basename(source_info["path"])
+                            if origin_name:
+                                status_parts.append(origin_name)
+                status_text = " • ".join(status_parts)
             node_id = self.tree.insert(
                 parent_id,
                 "end",
                 text=name_display,
-                values=(size_text,),
+                values=(status_text, size_text),
                 tags=tags,
             )
             path_tuple = tuple(segments) if segments else (relative_path,)
@@ -2120,7 +2136,7 @@ class TextureManagerGUI:
             )
             return
 
-        entry = self.node_to_entry[node_ids[0]]
+        selected_entry = self.node_to_entry[node_ids[0]]
         filename = filedialog.askopenfilename(
             title="Select replacement texture",
             filetypes=[
@@ -2161,8 +2177,20 @@ class TextureManagerGUI:
                 source_info["metadata_path"] = str(metadata_path)
                 source_info["metadata"] = metadata
 
+        selected_path = selected_entry.get("relative_path")
+        initial_entry_index = None
+        if selected_path is not None:
+            for idx, candidate in enumerate(self.entries):
+                if candidate.get("relative_path") == selected_path:
+                    initial_entry_index = idx
+                    break
+
         entry_index = initial_entry_index
-        entry = self.entries[entry_index] if entry_index is not None else None
+        entry = (
+            self.entries[entry_index]
+            if entry_index is not None and 0 <= entry_index < len(self.entries)
+            else selected_entry
+        )
         metadata_note = ""
 
         if isinstance(metadata, dict):
@@ -2207,10 +2235,17 @@ class TextureManagerGUI:
 
         source_info["resolved_relative_path"] = entry["relative_path"]
 
-        self.replacements[entry["relative_path"]] = {
+        replacement_record: Dict[str, object] = {
             "payload": payload,
             "source_info": source_info,
         }
+        if isinstance(metadata, dict):
+            for numeric_key in ("offset", "size"):
+                numeric_value = metadata.get(numeric_key)
+                if isinstance(numeric_value, int):
+                    replacement_record[numeric_key] = numeric_value
+
+        self.replacements[entry["relative_path"]] = replacement_record
         self._refresh_list()
         node_id = self.entry_nodes.get(entry["relative_path"])
         if node_id is not None:
