@@ -3,6 +3,7 @@ import io
 import json
 import struct
 import tempfile
+import types
 import unittest
 from pathlib import Path
 from typing import Sequence, Tuple
@@ -153,6 +154,68 @@ class PatchArchiveTests(unittest.TestCase):
                     rs._release_archive_buffer(patch_bytes)
             finally:
                 rs._release_archive_buffer(archive_bytes)
+
+    def test_gui_load_replacement_log_uses_complete_listing(self) -> None:
+        gui = object.__new__(rs.TextureManagerGUI)
+        gui.archive_bytes = b"archive"
+        gui.replacements = {}
+        gui.all_entries = [
+            {"relative_path": "textures/foo.dds", "size": 1, "offset": 0},
+            {"relative_path": "textures/bar.dds", "size": 1, "offset": 1},
+        ]
+        gui.image_entries = list(gui.all_entries)
+        gui.entries = []
+        gui.entry_nodes = {}
+        gui.last_activated_path = None
+        gui._refresh_list = mock.Mock()
+        gui._set_status = mock.Mock()
+        gui._on_entry_selected = mock.Mock()
+        gui.tree = mock.Mock()
+
+        original_filedialog = rs.filedialog
+        original_messagebox = rs.messagebox
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            source_path = tmp / "foo.dds"
+            payload = b"replacement-payload"
+            source_path.write_bytes(payload)
+
+            log_path = tmp / "foo.replacements.json"
+            log_path.write_text(
+                json.dumps(
+                    {
+                        "replacements": [
+                            {
+                                "relative_path": "textures/foo.dds",
+                                "source": {"path": str(source_path)},
+                            }
+                        ]
+                    }
+                )
+            )
+
+            rs.filedialog = types.SimpleNamespace(
+                askopenfilename=lambda **_kwargs: str(log_path)
+            )
+            rs.messagebox = types.SimpleNamespace(
+                showwarning=lambda *args, **kwargs: None,
+                showinfo=lambda *args, **kwargs: None,
+                showerror=lambda *args, **kwargs: None,
+            )
+
+            try:
+                gui.load_replacement_log()
+            finally:
+                rs.filedialog = original_filedialog
+                rs.messagebox = original_messagebox
+
+        self.assertIn("textures/foo.dds", gui.replacements)
+        self.assertEqual(
+            gui.replacements["textures/foo.dds"]["payload"],
+            payload,
+        )
+        gui._refresh_list.assert_called_once()
 
     def test_gui_on_entry_selected_uses_replacement_payload(self) -> None:
         class DummyTree:
