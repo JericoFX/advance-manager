@@ -1160,6 +1160,7 @@ class TextureManagerGUI:
         self.archive_path: Path | None = None
         self.archive_bytes: bytes | mmap.mmap | None = None
         self.all_entries: List[Dict[str, object]] = []
+        self.image_entries: List[Dict[str, object]] = []
         self.entries: List[Dict[str, object]] = []
         self.replacements: Dict[str, bytes] = {}
         self.wrapper_info: Dict[str, object] | None = None
@@ -1177,7 +1178,8 @@ class TextureManagerGUI:
         list_frame = tk.Frame(self.root)
         list_frame.grid(row=0, column=0, sticky="nsew")
 
-        list_frame.rowconfigure(0, weight=1)
+        list_frame.rowconfigure(0, weight=0)
+        list_frame.rowconfigure(1, weight=1)
         list_frame.columnconfigure(0, weight=1)
 
         self.style = ttk.Style(self.root)
@@ -1356,6 +1358,80 @@ class TextureManagerGUI:
                 tags = ("modified",)
             self.entry_tree.insert("", tk.END, iid=str(index), text=display, tags=tags)
         self.last_activated_index = None
+
+    def _apply_search_filter(self, _event: object | None = None) -> None:
+        query = ""
+        if hasattr(self, "search_var"):
+            query = self.search_var.get().strip().lower()
+
+        previous_entries = list(self.entries)
+        try:
+            selected_indices = self.listbox.curselection()
+        except tk.TclError:
+            selected_indices = ()
+        selected_paths = [
+            previous_entries[index]["relative_path"]
+            for index in selected_indices
+            if 0 <= index < len(previous_entries)
+        ]
+        active_path = None
+        if (
+            self.last_activated_index is not None
+            and 0 <= self.last_activated_index < len(previous_entries)
+        ):
+            active_path = previous_entries[self.last_activated_index]["relative_path"]
+
+        if not query:
+            filtered = list(self.image_entries)
+        else:
+            filtered = [
+                entry
+                for entry in self.image_entries
+                if query in entry["relative_path"].lower()
+            ]
+
+        self.entries = filtered
+        self._refresh_list()
+
+        if not filtered:
+            self._clear_preview("No textures match the current search")
+            return
+
+        restored_selection = False
+        if selected_paths:
+            new_indices = [
+                index
+                for index, entry in enumerate(filtered)
+                if entry["relative_path"] in selected_paths
+            ]
+            for index in new_indices:
+                try:
+                    self.listbox.selection_set(index)
+                except tk.TclError:
+                    break
+            if new_indices:
+                try:
+                    if active_path is not None:
+                        active_index = next(
+                            idx
+                            for idx, entry in enumerate(filtered)
+                            if entry["relative_path"] == active_path
+                        )
+                    else:
+                        active_index = new_indices[-1]
+                except StopIteration:
+                    active_index = new_indices[-1]
+                try:
+                    self.listbox.activate(active_index)
+                except tk.TclError:
+                    pass
+                else:
+                    self.last_activated_index = active_index
+                self._on_entry_selected(None)
+                restored_selection = True
+
+        if not restored_selection:
+            self._clear_preview()
 
     def _set_status(self, message: str) -> None:
         self.status.set(message)
@@ -1593,14 +1669,17 @@ class TextureManagerGUI:
         self.archive_path = Path(filename)
         self.archive_bytes = data
         self.all_entries = all_entries
-        self.entries = image_entries
+        self.image_entries = image_entries
+        self.entries = list(self.image_entries)
         self.replacements.clear()
         self.wrapper_info = wrapper
         self.layout_info = layout_info
-        self._refresh_list()
+        if hasattr(self, "search_var"):
+            self.search_var.set("")
+        self._apply_search_filter()
         self._clear_preview()
         self._set_status(
-            f"Loaded {len(image_entries)} image entries from {self.archive_path.name}"
+            f"Loaded {len(self.image_entries)} image entries from {self.archive_path.name}"
         )
 
     def export_selected(self) -> None:
@@ -1925,13 +2004,14 @@ class TextureManagerGUI:
                 _release_archive_buffer(previous_buffer)
                 self.archive_bytes = new_archive_bytes
                 self.all_entries = updated_entries
-                self.entries = [
+                self.image_entries = [
                     entry
                     for entry in updated_entries
                     if is_image_entry(entry["relative_path"])
                 ]
+                self.entries = list(self.image_entries)
                 self.replacements.clear()
-                self._refresh_list()
+                self._apply_search_filter()
                 self._set_status(f"Saved patched archive to {output_path}")
                 messagebox.showinfo(
                     "Archive saved", f"Patched archive written to {output_path}"
