@@ -2353,11 +2353,26 @@ class TextureManagerGUI:
             )
             return
 
-        entry_index = {
-            entry.get("relative_path"): entry
-            for entry in getattr(self, "entries", [])
-            if isinstance(entry.get("relative_path"), str)
-        }
+        entry_candidates: Sequence[Dict[str, object]] | None = None
+        for attr_name in ("all_entries", "image_entries", "entries"):
+            candidate = getattr(self, attr_name, None)
+            if isinstance(candidate, Sequence) and not isinstance(
+                candidate, (str, bytes)
+            ):
+                entry_candidates = candidate
+                if entry_candidates:
+                    break
+
+        if not entry_candidates:
+            entry_candidates = []
+
+        entry_index: Dict[str, Dict[str, object]] = {}
+        for entry in entry_candidates:
+            if not isinstance(entry, dict):
+                continue
+            relative_path = entry.get("relative_path")
+            if isinstance(relative_path, str):
+                entry_index[relative_path] = entry
 
         loaded_paths: List[str] = []
         errors: List[str] = []
