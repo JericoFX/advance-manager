@@ -4,6 +4,8 @@ import struct
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Sequence, Tuple
+from unittest import mock
 
 import sys
 
@@ -190,6 +192,77 @@ class PatchArchiveTests(unittest.TestCase):
                     self.assertEqual(patched, original_payload[::-1])
                 finally:
                     rs._release_archive_buffer(patch_bytes)
+            finally:
+                rs._release_archive_buffer(archive_bytes)
+
+    def test_gui_export_selected_uses_replacement_payload(self) -> None:
+        class DummyTree:
+            def __init__(self, nodes: Sequence[str]):
+                self._nodes = list(nodes)
+
+            def selection(self) -> Tuple[str, ...]:
+                return tuple(self._nodes)
+
+        class DummyStatus:
+            def __init__(self) -> None:
+                self.message: str | None = None
+
+            def set(self, message: str) -> None:
+                self.message = message
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            archive_path = tmp / "export_source.asr"
+            _build_rsfl_archive(archive_path)
+
+            archive_bytes, layout_info, entries, _wrapper = rs.load_archive(archive_path)
+            try:
+                gui = object.__new__(rs.TextureManagerGUI)
+                entry = copy.deepcopy(entries[0])
+                gui.archive_path = archive_path
+                gui.archive_bytes = archive_bytes
+                gui.entries = [entry]
+                gui.replacements = {
+                    entry["relative_path"]: {
+                        "payload": b"DDS replacement payload",  # recognised as DDS
+                        "source_info": {
+                            "metadata": {
+                                "relative_path": entry["relative_path"],
+                                "offset": 321,
+                                "size": len(b"DDS replacement payload"),
+                            }
+                        },
+                    }
+                }
+                gui.node_to_entry = {"node": entry}
+                gui.entry_nodes = {entry["relative_path"]: "node"}
+                gui.status = DummyStatus()
+                gui._set_status = rs.TextureManagerGUI._set_status.__get__(gui)
+                gui._export_entries = rs.TextureManagerGUI._export_entries.__get__(gui)
+
+                export_dir = tmp / "export"
+                export_dir.mkdir()
+
+                gui.tree = DummyTree(["node"])
+
+                with mock.patch.object(rs, "filedialog") as mock_filedialog:
+                    mock_filedialog.askdirectory.return_value = str(export_dir)
+                    gui.export_selected()
+
+                expected_relative, _original = rs.resolve_export_relative_path(
+                    entry["relative_path"], b"DDS replacement payload"
+                )
+                exported_path = export_dir / Path(*expected_relative.split("/"))
+                self.assertTrue(exported_path.exists())
+                self.assertEqual(
+                    exported_path.read_bytes(), b"DDS replacement payload"
+                )
+
+                metadata = json.loads(exported_path.with_suffix(exported_path.suffix + ".rsmeta").read_text())
+                self.assertEqual(metadata["relative_path"], entry["relative_path"])
+                self.assertEqual(metadata["size"], len(b"DDS replacement payload"))
+                self.assertEqual(metadata["offset"], 321)
+                self.assertEqual(metadata["source_archive"], archive_path.name)
             finally:
                 rs._release_archive_buffer(archive_bytes)
 

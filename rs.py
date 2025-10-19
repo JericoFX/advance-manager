@@ -1620,6 +1620,11 @@ class TextureManagerGUI:
         for entry in entries:
             payload = self.archive_bytes[entry["offset"] : entry["offset"] + entry["size"]]
             relative_path = entry["relative_path"]
+            replacement_value = self.replacements.get(relative_path)
+            replacement_payload = _extract_replacement_payload(replacement_value)
+            if replacement_payload is not None:
+                payload = replacement_payload
+
             export_relative, original_relative = resolve_export_relative_path(
                 relative_path, payload
             )
@@ -1629,10 +1634,30 @@ class TextureManagerGUI:
             target = destination_path / relative_target
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(payload)
+            metadata_offset = int(entry.get("offset", 0))
+            metadata_size = int(entry.get("size", 0))
+            if replacement_payload is not None:
+                metadata_size = len(replacement_payload)
+                replacement_offset: int | None = None
+                if isinstance(replacement_value, dict):
+                    offset_value = replacement_value.get("offset")
+                    if isinstance(offset_value, int):
+                        replacement_offset = offset_value
+                    else:
+                        source_info = replacement_value.get("source_info")
+                        if isinstance(source_info, dict):
+                            metadata_info = source_info.get("metadata")
+                            if isinstance(metadata_info, dict):
+                                offset_value = metadata_info.get("offset")
+                                if isinstance(offset_value, int):
+                                    replacement_offset = offset_value
+                if replacement_offset is not None:
+                    metadata_offset = replacement_offset
+
             metadata = {
                 "relative_path": relative_path,
-                "offset": int(entry.get("offset", 0)),
-                "size": int(entry.get("size", 0)),
+                "offset": metadata_offset,
+                "size": metadata_size,
             }
             if source_archive:
                 metadata["source_archive"] = source_archive
