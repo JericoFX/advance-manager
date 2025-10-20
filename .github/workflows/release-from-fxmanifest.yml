@@ -1,0 +1,36 @@
+name: Release from fxmanifest
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  release:
+    name: Tag and release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Read fxmanifest version
+        id: fxmanifest
+        run: |
+          VERSION=$(grep "^version" fxmanifest.lua | sed "s/version '\([^']*\)'/\1/")
+          if [ -z "$VERSION" ]; then
+            echo "Unable to determine version from fxmanifest.lua" >&2
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub release
+        uses: ncipollo/release-action@v1
+        with:
+          tag: v${{ steps.fxmanifest.outputs.version }}
+          name: v${{ steps.fxmanifest.outputs.version }}
+          commit: ${{ github.sha }}
+          skipIfReleaseExists: true
+          generateReleaseNotes: true
