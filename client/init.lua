@@ -2,6 +2,8 @@ QBCore = exports['qb-core']:GetCoreObject()
 
 local PlayerData = QBCore.Functions.GetPlayerData()
 local currentBusiness = nil
+local groupDigits = lib.math.groupdigits
+local deepClone = lib.table.deepclone
 
 -- Update player data on load
 RegisterNetEvent('QBCore:Client:OnPlayerLoaded', function()
@@ -12,8 +14,26 @@ RegisterNetEvent('QBCore:Client:OnJobUpdate', function(JobInfo)
     PlayerData.job = JobInfo
 end)
 
+local function ensureOnFoot()
+    local vehicle = lib.cache('vehicle')
+    if vehicle and vehicle ~= false then
+        lib.notify({
+            title = 'Unavailable',
+            description = 'Exit your vehicle before managing your business',
+            type = 'error'
+        })
+        return false
+    end
+
+    return true
+end
+
 -- Create Business Interface (Admin only)
 local function ShowCreateBusinessMenu()
+    if not ensureOnFoot() then
+        return
+    end
+
     local availableJobs = lib.callback.await('advance-manager:getAvailableJobs', false)
     
     if not availableJobs then
@@ -47,8 +67,12 @@ end
 
 -- Business Management Interface
 local function ShowBusinessManagementMenu()
+    if not ensureOnFoot() then
+        return
+    end
+
     local business = lib.callback.await('advance-manager:getPlayerBusiness', false)
-    
+
     if not business then
         lib.notify({
             title = 'No Business',
@@ -57,13 +81,13 @@ local function ShowBusinessManagementMenu()
         })
         return
     end
-    
-    currentBusiness = business
-    
+
+    currentBusiness = deepClone(business)
+
     local options = {
         {
             title = 'Business Information',
-            description = 'Name: ' .. business.name .. ' | Funds: $' .. business.funds,
+            description = ('Name: %s | Funds: $%s'):format(business.name, groupDigits(business.funds or 0)),
             icon = 'fas fa-info-circle',
             disabled = true
         },
@@ -129,7 +153,7 @@ local function ShowEmployeeManagementMenu(businessId)
         for _, employee in pairs(employees) do
             table.insert(options, {
                 title = employee.name,
-                description = 'Grade: ' .. employee.grade .. ' | Wage: $' .. employee.wage,
+                description = ('Grade: %s | Wage: $%s'):format(employee.grade, groupDigits(employee.wage or 0)),
                 icon = 'fas fa-user',
                 onSelect = function()
                     ShowEmployeeDetailsMenu(businessId, employee)
@@ -187,7 +211,7 @@ local function ShowEmployeeDetailsMenu(businessId, employee)
     local options = {
         {
             title = 'Employee: ' .. employee.name,
-            description = 'Grade: ' .. employee.grade .. ' | Wage: $' .. employee.wage,
+            description = ('Grade: %s | Wage: $%s'):format(employee.grade, groupDigits(employee.wage or 0)),
             icon = 'fas fa-user',
             disabled = true
         },
@@ -296,11 +320,11 @@ end
 local function ShowFinancialManagementMenu(businessId)
     -- Get current funds
     local currentFunds = lib.callback.await('advance-manager:getBusinessFunds', false, businessId) or 0
-    
+
     local options = {
         {
             title = 'Current Funds',
-            description = 'Business has $' .. currentFunds,
+            description = ('Business has $%s'):format(groupDigits(currentFunds)),
             icon = 'fas fa-wallet',
             disabled = true
         },

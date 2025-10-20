@@ -2,6 +2,8 @@ QBCore = exports['qb-core']:GetCoreObject()
 
 -- Initialize server-side cache for employees (more secure than GlobalState)
 local EmployeeCache = {}
+local deepClone = lib.table.deepclone
+local round = lib.math.round
 
 -- Load modules
 local Business = require 'server.modules.business'
@@ -9,7 +11,7 @@ local Employees = require 'server.modules.employees'
 
 -- Function to get employee cache
 local function GetEmployeeCache()
-    return EmployeeCache
+    return deepClone(EmployeeCache)
 end
 
 -- Function to set employee cache
@@ -19,7 +21,8 @@ end
 
 -- Function to get employees for specific business from cache
 local function GetEmployeesFromCache(businessId)
-    return EmployeeCache[tostring(businessId)] or {}
+    local employees = EmployeeCache[tostring(businessId)]
+    return employees and deepClone(employees) or {}
 end
 
 -- Function to set employees for specific business in cache
@@ -60,9 +63,17 @@ CreateThread(function()
     ]])
 
     print('[advance-manager] Database tables initialized.')
-    
+
     -- Load all employees to cache
     Employees.LoadAllToCache()
+
+    lib.cron.new('*/15 * * * *', function()
+        local success, err = pcall(Employees.LoadAllToCache)
+
+        if not success then
+            lib.print.error(('[advance-manager] Failed to refresh employee cache: %s'):format(err))
+        end
+    end, { maxDelay = 60 })
 end)
 
 -- Admin commands
@@ -276,15 +287,20 @@ end)
 lib.callback.register('advance-manager:depositFunds', function(source, businessId, amount)
     local src = source
     local Player = QBCore.Functions.GetPlayer(src)
-    
+
     if not Player then
         return false, 'Player not found'
     end
-    
+
     if not Business.IsBoss(Player.PlayerData.citizenid, businessId) then
         return false, 'No permission'
     end
-    
+
+    amount = round(amount or 0)
+    if amount <= 0 then
+        return false, 'Invalid amount'
+    end
+
     -- Check if player has enough money
     local playerMoney = Player.Functions.GetMoney('cash')
     if playerMoney < amount then
@@ -309,15 +325,20 @@ end)
 lib.callback.register('advance-manager:withdrawFunds', function(source, businessId, amount)
     local src = source
     local Player = QBCore.Functions.GetPlayer(src)
-    
+
     if not Player then
         return false, 'Player not found'
     end
-    
+
     if not Business.IsBoss(Player.PlayerData.citizenid, businessId) then
         return false, 'No permission'
     end
-    
+
+    amount = round(amount or 0)
+    if amount <= 0 then
+        return false, 'Invalid amount'
+    end
+
     -- Check if business has enough money
     local businessFunds = Business.GetFunds(businessId)
     if businessFunds < amount then

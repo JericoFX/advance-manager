@@ -1,4 +1,5 @@
 local Business = {}
+local deepClone = lib.table.deepclone
 
 function Business.GetJobInfo(jobName)
     local job = QBCore.Shared.Jobs[jobName]
@@ -17,7 +18,7 @@ function Business.GetJobInfo(jobName)
     return {
         name = jobName,
         label = job.label,
-        grades = job.grades,
+        grades = deepClone(job.grades),
         bossGrade = bossGrade
     }
 end
