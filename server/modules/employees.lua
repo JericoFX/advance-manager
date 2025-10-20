@@ -1,6 +1,13 @@
 local Employees = {}
 local Business = require 'server.modules.business'
 
+local clamp = lib.math.clamp
+local round = lib.math.round
+local contains = lib.table.contains
+local deepClone = lib.table.deepclone
+
+local MIN_WAGE, MAX_WAGE = 0, 10000
+
 local function normalizeCharinfo(rawCharinfo)
     local decoded = {}
 
@@ -33,7 +40,49 @@ local function normalizeCharinfo(rawCharinfo)
     decoded.lastname = lastname
     decoded.fullname = firstname .. ' ' .. lastname
 
-    return decoded
+    return deepClone(decoded)
+end
+
+local function sanitizeWage(wage)
+    return clamp(round(wage or MIN_WAGE), MIN_WAGE, MAX_WAGE)
+end
+
+local function extractGrades(jobInfo)
+    local grades = {}
+    local minGrade, maxGrade = math.huge, -math.huge
+
+    for gradeKey in pairs(jobInfo.grades) do
+        local numericGrade = tonumber(gradeKey)
+
+        if numericGrade then
+            grades[#grades + 1] = numericGrade
+            if numericGrade < minGrade then
+                minGrade = numericGrade
+            end
+
+            if numericGrade > maxGrade then
+                maxGrade = numericGrade
+            end
+        end
+    end
+
+    if minGrade == math.huge then
+        minGrade, maxGrade = 0, 0
+    end
+
+    return grades, minGrade, maxGrade
+end
+
+local function sanitizeGrade(jobInfo, grade)
+    local numericGrade = round(grade or 0)
+    local gradeSet, minGrade, maxGrade = extractGrades(jobInfo)
+    numericGrade = clamp(numericGrade, minGrade, maxGrade)
+
+    if not contains(gradeSet, numericGrade) then
+        return nil
+    end
+
+    return numericGrade
 end
 
 -- Función para cargar todos los empleados al caché
@@ -64,7 +113,7 @@ function Employees.LoadAllToCache()
                 full_name = charinfo.fullname,
                 business_name = employee.business_name,
                 job_name = employee.job_name,
-                charinfo = charinfo,
+                charinfo = deepClone(charinfo),
                 last_updated = os.time()
             })
         end
@@ -104,7 +153,7 @@ function Employees.RefreshCache(businessId)
                 full_name = charinfo.fullname,
                 business_name = employee.business_name,
                 job_name = employee.job_name,
-                charinfo = charinfo,
+                charinfo = deepClone(charinfo),
                 last_updated = os.time()
             })
         end
@@ -149,7 +198,8 @@ function Employees.Hire(businessId, citizenId, grade, wage)
         return false, 'Job not found'
     end
     
-    if not jobInfo.grades[tostring(grade)] then
+    local sanitizedGrade = sanitizeGrade(jobInfo, grade)
+    if not sanitizedGrade then
         return false, 'Invalid grade'
     end
     
@@ -162,14 +212,14 @@ function Employees.Hire(businessId, citizenId, grade, wage)
     -- Set job for player
     local Player = QBCore.Functions.GetPlayerByCitizenId(citizenId)
     if Player then
-        Player.Functions.SetJob(business.job_name, grade)
+        Player.Functions.SetJob(business.job_name, sanitizedGrade)
     end
-    
+
     -- Add to database
     local result = MySQL.insert.await([[
         INSERT INTO business_employees (business_id, citizenid, grade, wage)
         VALUES (?, ?, ?, ?)
-    ]], {businessId, citizenId, grade, wage})
+    ]], {businessId, citizenId, sanitizedGrade, sanitizeWage(wage)})
     
     if result then
         -- Refresh cache for this business
@@ -223,7 +273,7 @@ function Employees.GetAll(businessId)
                 wage = employee.wage,
                 name = charinfo.fullname,
                 full_name = charinfo.fullname,
-                charinfo = charinfo
+                charinfo = deepClone(charinfo)
             })
         end
     end
@@ -232,11 +282,12 @@ function Employees.GetAll(businessId)
 end
 
 function Employees.UpdateWage(businessId, citizenId, newWage)
+    local sanitizedWage = sanitizeWage(newWage)
     local result = MySQL.update.await([[
-        UPDATE business_employees 
-        SET wage = ? 
+        UPDATE business_employees
+        SET wage = ?
         WHERE business_id = ? AND citizenid = ?
-    ]], {newWage, businessId, citizenId})
+    ]], {sanitizedWage, businessId, citizenId})
     
     if result > 0 then
         -- Refresh cache for this business
@@ -252,24 +303,25 @@ function Employees.UpdateGrade(businessId, citizenId, newGrade)
     if not business then
         return false, 'Business not found'
     end
-    
+
     local jobInfo = Business.GetJobInfo(business.job_name)
-    if not jobInfo or not jobInfo.grades[tostring(newGrade)] then
+    local sanitizedGrade = jobInfo and sanitizeGrade(jobInfo, newGrade)
+    if not sanitizedGrade then
         return false, 'Invalid grade'
     end
-    
+
     -- Update player job grade
     local Player = QBCore.Functions.GetPlayerByCitizenId(citizenId)
     if Player then
-        Player.Functions.SetJob(business.job_name, newGrade)
+        Player.Functions.SetJob(business.job_name, sanitizedGrade)
     end
-    
+
     -- Update database
     local result = MySQL.update.await([[
-        UPDATE business_employees 
-        SET grade = ? 
+        UPDATE business_employees
+        SET grade = ?
         WHERE business_id = ? AND citizenid = ?
-    ]], {newGrade, businessId, citizenId})
+    ]], {sanitizedGrade, businessId, citizenId})
     
     if result > 0 then
         -- Refresh cache for this business
