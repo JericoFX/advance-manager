@@ -36,12 +36,15 @@ const FiveMCallbacks = {
                 return new Promise((resolve, reject) => {
                     this.performCallback('advance-manager:getPlayerBusiness', {}, (result) => {
                         if (result) {
+                            BusinessAPI.updateFromServer(result);
                             const previousBusiness = BusinessAPI.currentBusiness || {};
                             BusinessAPI.currentBusiness = {
                                 ...previousBusiness,
                                 ...result,
                                 jobName: result.job_name || result.jobName || result.job || result.jobLabel || previousBusiness.jobName
                             };
+
+                            BusinessAPI.updateFromServer(BusinessAPI.currentBusiness);
 
                             if (!Array.isArray(BusinessAPI.currentBusiness.employees)) {
                                 BusinessAPI.currentBusiness.employees = [];

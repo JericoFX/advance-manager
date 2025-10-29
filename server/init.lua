@@ -171,7 +171,7 @@ exports('getEmployeeByBusinessAndCitizen', function(businessId, citizenId)
 end)
 
 exports('getAllEmployeesCache', function()
-    return EmployeeCache
+    return GetEmployeeCache()
 end)
 
 exports('isEmployeeOfBusiness', function(businessId, citizenId)
@@ -247,10 +247,43 @@ lib.callback.register('advance-manager:updateEmployeeGrade', function(source, bu
     return Employees.UpdateGrade(businessId, citizenId, newGrade)
 end)
 
+local function enrichBusinessPayload(business)
+    if not business then
+        return nil
+    end
+
+    local jobInfo = Business.GetJobInfo(business.job_name)
+    if jobInfo then
+        local jobInfoPayload = deepClone(jobInfo)
+        business.jobInfo = jobInfoPayload
+        business.job_info = jobInfoPayload
+
+        local gradeMetadata = Employees.GetGradeMetadata(jobInfo)
+        if gradeMetadata and next(gradeMetadata) then
+            local gradePayload = deepClone(gradeMetadata)
+            business.gradeMetadata = gradePayload
+            business.grade_metadata = gradePayload
+        end
+    end
+
+    local minWage, maxWage = Employees.GetWageLimits()
+    business.wageLimits = {min = minWage, max = maxWage}
+    business.wage_limits = deepClone(business.wageLimits)
+
+    local cachedEmployees = Employees.GetFromCache(business.id)
+    if cachedEmployees then
+        business.employee_count = #cachedEmployees
+    else
+        business.employee_count = 0
+    end
+
+    return business
+end
+
 lib.callback.register('advance-manager:getPlayerBusiness', function(source)
     local src = source
     local Player = QBCore.Functions.GetPlayer(src)
-    
+
     if not Player then
         return nil
     end
@@ -258,15 +291,15 @@ lib.callback.register('advance-manager:getPlayerBusiness', function(source)
     -- Check if player owns a business
     local ownedBusinesses = Business.GetByOwner(Player.PlayerData.citizenid)
     if #ownedBusinesses > 0 then
-        return ownedBusinesses[1]
+        return enrichBusinessPayload(ownedBusinesses[1])
     end
-    
+
     -- Check if player works for a business
     local business = Business.GetByJob(Player.PlayerData.job.name)
     if business then
-        return business
+        return enrichBusinessPayload(business)
     end
-    
+
     return nil
 end)
 

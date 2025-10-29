@@ -8,6 +8,10 @@ local deepClone = lib.table.deepclone
 
 local MIN_WAGE, MAX_WAGE = 0, 10000
 
+function Employees.GetWageLimits()
+    return MIN_WAGE, MAX_WAGE
+end
+
 local function normalizeCharinfo(rawCharinfo)
     local decoded = {}
 
@@ -47,6 +51,21 @@ local function sanitizeWage(wage)
     return clamp(round(wage or MIN_WAGE), MIN_WAGE, MAX_WAGE)
 end
 
+local function resolveGradeWage(jobInfo, grade, fallback)
+    local candidate = fallback
+
+    if type(jobInfo) == 'table' and type(jobInfo.grades) == 'table' then
+        local gradeData = jobInfo.grades[tostring(grade)]
+        local payment = tonumber(gradeData and gradeData.payment)
+
+        if payment then
+            candidate = payment
+        end
+    end
+
+    return sanitizeWage(candidate)
+end
+
 local function extractGrades(jobInfo)
     local grades = {}
     local minGrade, maxGrade = math.huge, -math.huge
@@ -83,6 +102,32 @@ local function sanitizeGrade(jobInfo, grade)
     end
 
     return numericGrade
+end
+
+function Employees.GetGradeMetadata(jobInfo)
+    local metadata = {}
+
+    if type(jobInfo) ~= 'table' or type(jobInfo.grades) ~= 'table' then
+        return metadata
+    end
+
+    for gradeKey, gradeData in pairs(jobInfo.grades) do
+        local numericGrade = tonumber(gradeKey)
+        if numericGrade then
+            metadata[#metadata + 1] = {
+                value = numericGrade,
+                label = gradeData.label or gradeData.name or ('Grade ' .. numericGrade),
+                wage = tonumber(gradeData.payment),
+                isboss = gradeData.isboss and true or false
+            }
+        end
+    end
+
+    table.sort(metadata, function(a, b)
+        return a.value < b.value
+    end)
+
+    return metadata
 end
 
 -- Función para cargar todos los empleados al caché
@@ -215,11 +260,13 @@ function Employees.Hire(businessId, citizenId, grade, wage)
         Player.Functions.SetJob(business.job_name, sanitizedGrade)
     end
 
+    local resolvedWage = resolveGradeWage(jobInfo, sanitizedGrade, wage)
+
     -- Add to database
-    local result = MySQL.insert.await([[
+    local result = MySQL.insert.await([[ 
         INSERT INTO business_employees (business_id, citizenid, grade, wage)
         VALUES (?, ?, ?, ?)
-    ]], {businessId, citizenId, sanitizedGrade, sanitizeWage(wage)})
+    ]], {businessId, citizenId, sanitizedGrade, resolvedWage})
     
     if result then
         -- Refresh cache for this business
@@ -316,12 +363,15 @@ function Employees.UpdateGrade(businessId, citizenId, newGrade)
         Player.Functions.SetJob(business.job_name, sanitizedGrade)
     end
 
+    local employee = Employees.GetByBusinessAndCitizen(businessId, citizenId)
+    local resolvedWage = resolveGradeWage(jobInfo, sanitizedGrade, employee and employee.wage)
+
     -- Update database
-    local result = MySQL.update.await([[
+    local result = MySQL.update.await([[ 
         UPDATE business_employees
-        SET grade = ?
+        SET grade = ?, wage = ?
         WHERE business_id = ? AND citizenid = ?
-    ]], {sanitizedGrade, businessId, citizenId})
+    ]], {sanitizedGrade, resolvedWage, businessId, citizenId})
     
     if result > 0 then
         -- Refresh cache for this business
