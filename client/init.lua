@@ -262,7 +262,8 @@ local function ShowHireEmployeeMenu(businessId)
 
     for _, gradeInfo in ipairs(gradeMetadata) do
         local gradeValue = gradeInfo.grade
-        local optionLabel = ('Grade %d - %s'):format(gradeValue, gradeInfo.label)
+        local wageDisplay = gradeInfo.wage and groupDigits(gradeInfo.wage) or '0'
+        local optionLabel = ('Grade %d - %s ($%s/hr)'):format(gradeValue, gradeInfo.label, wageDisplay)
         table.insert(gradeOptions, {value = tostring(gradeValue), label = optionLabel})
         gradeToWage[tostring(gradeValue)] = gradeInfo.wage
         gradeMin = gradeMin and math.min(gradeMin, gradeValue) or gradeValue
@@ -297,16 +298,11 @@ local function ShowHireEmployeeMenu(businessId)
         fields[#fields + 1] = {type = 'number', label = 'Grade', placeholder = ('Enter job grade (%d-%d)'):format(gradeMin, gradeMax), required = true, min = gradeMin, max = gradeMax}
     end
 
-    local defaultWage = defaultGradeKey and gradeToWage[defaultGradeKey] or wageMin
-    local wageFieldIndex = #fields + 1
-    fields[#fields + 1] = {type = 'number', label = 'Wage', placeholder = 'Enter hourly wage', required = true, min = wageMin, max = wageMax, default = defaultWage}
-
     local input = lib.inputDialog('Hire Employee', fields)
 
     if input then
         local playerId = tonumber(input[1])
         local gradeInput = input[gradeFieldIndex]
-        local wageInput = tonumber(input[wageFieldIndex])
 
         if not playerId or playerId <= 0 then
             lib.notify({
@@ -345,19 +341,14 @@ local function ShowHireEmployeeMenu(businessId)
             return
         end
 
-        local defaultForGrade = gradeToWage[tostring(gradeValue)]
-        local wageValue = wageInput or defaultForGrade or wageMin
-
-        if wageValue < wageMin or wageValue > wageMax then
-            lib.notify({
-                title = 'Error',
-                description = ('Wage must be between %s and %s'):format(groupDigits(wageMin), groupDigits(wageMax)),
-                type = 'error'
-            })
-            return
+        local assignedWage = gradeToWage[tostring(gradeValue)]
+        if not assignedWage then
+            assignedWage = wageMin
         end
 
-        local success, message = lib.callback.await('advance-manager:hireEmployee', false, businessId, playerId, gradeValue, wageValue)
+        assignedWage = math.max(wageMin, math.min(assignedWage, wageMax))
+
+        local success, message = lib.callback.await('advance-manager:hireEmployee', false, businessId, playerId, gradeValue, assignedWage)
 
         if success then
             lib.notify({
@@ -385,7 +376,8 @@ local function ShowEmployeeDetailsMenu(businessId, employee)
     local gradeMin, gradeMax = nil, nil
 
     for _, gradeInfo in ipairs(gradeMetadata) do
-        local optionLabel = ('Grade %d - %s'):format(gradeInfo.grade, gradeInfo.label)
+        local wageDisplay = gradeInfo.wage and groupDigits(gradeInfo.wage) or '0'
+        local optionLabel = ('Grade %d - %s ($%s/hr)'):format(gradeInfo.grade, gradeInfo.label, wageDisplay)
         table.insert(gradeOptions, {value = tostring(gradeInfo.grade), label = optionLabel})
         gradeLookup[tostring(gradeInfo.grade)] = gradeInfo
         gradeMin = gradeMin and math.min(gradeMin, gradeInfo.grade) or gradeInfo.grade
