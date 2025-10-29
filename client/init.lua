@@ -5,6 +5,79 @@ local currentBusiness = nil
 local groupDigits = lib.math.groupdigits
 local deepClone = lib.table.deepclone
 
+local function getBusinessGradeMetadata(business)
+    if not business then
+        return {}
+    end
+
+    local metadata = business.gradeMetadata or business.grade_metadata
+    if type(metadata) == 'table' and #metadata > 0 then
+        local normalized = {}
+
+        for _, entry in pairs(metadata) do
+            if type(entry) == 'table' then
+                local gradeValue = tonumber(entry.value or entry.grade)
+                if gradeValue then
+                    normalized[#normalized + 1] = {
+                        grade = gradeValue,
+                        label = entry.label or entry.name or ('Grade ' .. gradeValue),
+                        wage = tonumber(entry.wage or entry.payment),
+                        isboss = entry.isboss and true or false
+                    }
+                end
+            end
+        end
+
+        table.sort(normalized, function(a, b)
+            return a.grade < b.grade
+        end)
+
+        return normalized
+    end
+
+    local jobInfo = business.jobInfo or business.job_info
+    if type(jobInfo) == 'table' and type(jobInfo.grades) == 'table' then
+        local normalized = {}
+
+        for gradeKey, gradeData in pairs(jobInfo.grades) do
+            local gradeValue = tonumber(gradeKey)
+            if gradeValue then
+                normalized[#normalized + 1] = {
+                    grade = gradeValue,
+                    label = gradeData.label or gradeData.name or ('Grade ' .. gradeValue),
+                    wage = tonumber(gradeData.payment),
+                    isboss = gradeData.isboss and true or false
+                }
+            end
+        end
+
+        table.sort(normalized, function(a, b)
+            return a.grade < b.grade
+        end)
+
+        return normalized
+    end
+
+    return {}
+end
+
+local function getBusinessWageLimits(business)
+    local limits = business and (business.wageLimits or business.wage_limits)
+    local minWage = 0
+    local maxWage = 10000
+
+    if type(limits) == 'table' then
+        if tonumber(limits.min) then
+            minWage = tonumber(limits.min)
+        end
+        if tonumber(limits.max) then
+            maxWage = tonumber(limits.max)
+        end
+    end
+
+    return minWage, maxWage
+end
+
 -- Update player data on load
 RegisterNetEvent('QBCore:Client:OnPlayerLoaded', function()
     PlayerData = QBCore.Functions.GetPlayerData()
@@ -180,15 +253,112 @@ end
 
 -- Hire Employee Interface
 local function ShowHireEmployeeMenu(businessId)
-    local input = lib.inputDialog('Hire Employee', {
-        {type = 'number', label = 'Player ID', placeholder = 'Enter player ID to hire', required = true},
-        {type = 'number', label = 'Grade', placeholder = 'Enter job grade (0-4)', required = true, min = 0, max = 4},
-        {type = 'number', label = 'Wage', placeholder = 'Enter hourly wage', required = true, min = 10, max = 100}
-    })
-    
+    local gradeMetadata = getBusinessGradeMetadata(currentBusiness)
+    local wageMin, wageMax = getBusinessWageLimits(currentBusiness)
+    local gradeOptions = {}
+    local gradeToWage = {}
+    local gradeMin, gradeMax = nil, nil
+    local defaultGradeKey = nil
+
+    for _, gradeInfo in ipairs(gradeMetadata) do
+        local gradeValue = gradeInfo.grade
+        local optionLabel = ('Grade %d - %s'):format(gradeValue, gradeInfo.label)
+        table.insert(gradeOptions, {value = tostring(gradeValue), label = optionLabel})
+        gradeToWage[tostring(gradeValue)] = gradeInfo.wage
+        gradeMin = gradeMin and math.min(gradeMin, gradeValue) or gradeValue
+        gradeMax = gradeMax and math.max(gradeMax, gradeValue) or gradeValue
+        defaultGradeKey = defaultGradeKey or tostring(gradeValue)
+    end
+
+    if not gradeMin or not gradeMax then
+        local jobInfo = currentBusiness and (currentBusiness.jobInfo or currentBusiness.job_info)
+        if jobInfo and type(jobInfo.grades) == 'table' then
+            for gradeKey in pairs(jobInfo.grades) do
+                local numericGrade = tonumber(gradeKey)
+                if numericGrade then
+                    gradeMin = gradeMin and math.min(gradeMin, numericGrade) or numericGrade
+                    gradeMax = gradeMax and math.max(gradeMax, numericGrade) or numericGrade
+                end
+            end
+        end
+    end
+
+    gradeMin = gradeMin or 0
+    gradeMax = gradeMax or gradeMin
+
+    local fields = {
+        {type = 'number', label = 'Player ID', placeholder = 'Enter player ID to hire', required = true}
+    }
+
+    local gradeFieldIndex = #fields + 1
+    if #gradeOptions > 0 then
+        fields[#fields + 1] = {type = 'select', label = 'Grade', options = gradeOptions, required = true, default = defaultGradeKey}
+    else
+        fields[#fields + 1] = {type = 'number', label = 'Grade', placeholder = ('Enter job grade (%d-%d)'):format(gradeMin, gradeMax), required = true, min = gradeMin, max = gradeMax}
+    end
+
+    local defaultWage = defaultGradeKey and gradeToWage[defaultGradeKey] or wageMin
+    local wageFieldIndex = #fields + 1
+    fields[#fields + 1] = {type = 'number', label = 'Wage', placeholder = 'Enter hourly wage', required = true, min = wageMin, max = wageMax, default = defaultWage}
+
+    local input = lib.inputDialog('Hire Employee', fields)
+
     if input then
-        local success, message = lib.callback.await('advance-manager:hireEmployee', false, businessId, input[1], input[2], input[3])
-        
+        local playerId = tonumber(input[1])
+        local gradeInput = input[gradeFieldIndex]
+        local wageInput = tonumber(input[wageFieldIndex])
+
+        if not playerId or playerId <= 0 then
+            lib.notify({
+                title = 'Error',
+                description = 'Please enter a valid player ID',
+                type = 'error'
+            })
+            return
+        end
+
+        local gradeValue = tonumber(gradeInput)
+        if not gradeValue then
+            lib.notify({
+                title = 'Error',
+                description = 'Invalid grade selected',
+                type = 'error'
+            })
+            return
+        end
+
+        if gradeValue < gradeMin or gradeValue > gradeMax then
+            lib.notify({
+                title = 'Error',
+                description = ('Grade must be between %d and %d'):format(gradeMin, gradeMax),
+                type = 'error'
+            })
+            return
+        end
+
+        if #gradeOptions > 0 and not gradeToWage[tostring(gradeValue)] then
+            lib.notify({
+                title = 'Error',
+                description = 'Selected grade is not available for this business',
+                type = 'error'
+            })
+            return
+        end
+
+        local defaultForGrade = gradeToWage[tostring(gradeValue)]
+        local wageValue = wageInput or defaultForGrade or wageMin
+
+        if wageValue < wageMin or wageValue > wageMax then
+            lib.notify({
+                title = 'Error',
+                description = ('Wage must be between %s and %s'):format(groupDigits(wageMin), groupDigits(wageMax)),
+                type = 'error'
+            })
+            return
+        end
+
+        local success, message = lib.callback.await('advance-manager:hireEmployee', false, businessId, playerId, gradeValue, wageValue)
+
         if success then
             lib.notify({
                 title = 'Success',
@@ -208,6 +378,36 @@ end
 
 -- Employee Details Interface
 local function ShowEmployeeDetailsMenu(businessId, employee)
+    local gradeMetadata = getBusinessGradeMetadata(currentBusiness)
+    local wageMin, wageMax = getBusinessWageLimits(currentBusiness)
+    local gradeOptions = {}
+    local gradeLookup = {}
+    local gradeMin, gradeMax = nil, nil
+
+    for _, gradeInfo in ipairs(gradeMetadata) do
+        local optionLabel = ('Grade %d - %s'):format(gradeInfo.grade, gradeInfo.label)
+        table.insert(gradeOptions, {value = tostring(gradeInfo.grade), label = optionLabel})
+        gradeLookup[tostring(gradeInfo.grade)] = gradeInfo
+        gradeMin = gradeMin and math.min(gradeMin, gradeInfo.grade) or gradeInfo.grade
+        gradeMax = gradeMax and math.max(gradeMax, gradeInfo.grade) or gradeInfo.grade
+    end
+
+    if not gradeMin or not gradeMax then
+        local jobInfo = currentBusiness and (currentBusiness.jobInfo or currentBusiness.job_info)
+        if jobInfo and type(jobInfo.grades) == 'table' then
+            for gradeKey in pairs(jobInfo.grades) do
+                local numericGrade = tonumber(gradeKey)
+                if numericGrade then
+                    gradeMin = gradeMin and math.min(gradeMin, numericGrade) or numericGrade
+                    gradeMax = gradeMax and math.max(gradeMax, numericGrade) or numericGrade
+                end
+            end
+        end
+    end
+
+    gradeMin = gradeMin or 0
+    gradeMax = gradeMax or gradeMin
+
     local options = {
         {
             title = 'Employee: ' .. employee.name,
@@ -221,12 +421,23 @@ local function ShowEmployeeDetailsMenu(businessId, employee)
             icon = 'fas fa-dollar-sign',
             onSelect = function()
                 local input = lib.inputDialog('Update Wage', {
-                    {type = 'number', label = 'New Wage', placeholder = 'Enter new wage', required = true, min = 10, max = 100, default = employee.wage}
+                    {type = 'number', label = 'New Wage', placeholder = 'Enter new wage', required = true, min = wageMin, max = wageMax, default = employee.wage}
                 })
-                
+
                 if input then
-                    local success = lib.callback.await('advance-manager:updateEmployeeWage', false, businessId, employee.citizenid, input[1])
-                    
+                    local wageValue = tonumber(input[1])
+
+                    if not wageValue or wageValue < wageMin or wageValue > wageMax then
+                        lib.notify({
+                            title = 'Error',
+                            description = ('Wage must be between %s and %s'):format(groupDigits(wageMin), groupDigits(wageMax)),
+                            type = 'error'
+                        })
+                        return
+                    end
+
+                    local success = lib.callback.await('advance-manager:updateEmployeeWage', false, businessId, employee.citizenid, wageValue)
+
                     if success then
                         lib.notify({
                             title = 'Success',
@@ -249,13 +460,41 @@ local function ShowEmployeeDetailsMenu(businessId, employee)
             description = 'Change employee grade',
             icon = 'fas fa-arrow-up',
             onSelect = function()
-                local input = lib.inputDialog('Update Grade', {
-                    {type = 'number', label = 'New Grade', placeholder = 'Enter new grade (0-4)', required = true, min = 0, max = 4, default = employee.grade}
-                })
-                
+                local input
+
+                if #gradeOptions > 0 then
+                    input = lib.inputDialog('Update Grade', {
+                        {type = 'select', label = 'New Grade', options = gradeOptions, required = true, default = tostring(employee.grade)}
+                    })
+                else
+                    input = lib.inputDialog('Update Grade', {
+                        {type = 'number', label = 'New Grade', placeholder = ('Enter new grade (%d-%d)'):format(gradeMin, gradeMax), required = true, min = gradeMin, max = gradeMax, default = employee.grade}
+                    })
+                end
+
                 if input then
-                    local success = lib.callback.await('advance-manager:updateEmployeeGrade', false, businessId, employee.citizenid, input[1])
-                    
+                    local gradeValue = tonumber(input[1])
+
+                    if not gradeValue or gradeValue < gradeMin or gradeValue > gradeMax then
+                        lib.notify({
+                            title = 'Error',
+                            description = ('Grade must be between %d and %d'):format(gradeMin, gradeMax),
+                            type = 'error'
+                        })
+                        return
+                    end
+
+                    if #gradeOptions > 0 and not gradeLookup[tostring(gradeValue)] then
+                        lib.notify({
+                            title = 'Error',
+                            description = 'Selected grade is not available for this business',
+                            type = 'error'
+                        })
+                        return
+                    end
+
+                    local success = lib.callback.await('advance-manager:updateEmployeeGrade', false, businessId, employee.citizenid, gradeValue)
+
                     if success then
                         lib.notify({
                             title = 'Success',

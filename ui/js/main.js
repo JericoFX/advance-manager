@@ -138,6 +138,24 @@ const BusinessManager = {
     },
     
     showHireModal() {
+        const grades = typeof BusinessAPI !== 'undefined' && typeof BusinessAPI.getGrades === 'function'
+            ? BusinessAPI.getGrades()
+            : [];
+        const wageLimits = typeof BusinessAPI !== 'undefined' && BusinessAPI.wageLimits
+            ? BusinessAPI.wageLimits
+            : {};
+        const wageMinCandidate = wageLimits && Number(wageLimits.min);
+        const wageMaxCandidate = wageLimits && Number(wageLimits.max);
+        const wageMin = Number.isFinite(wageMinCandidate) ? wageMinCandidate : 0;
+        const wageMax = Number.isFinite(wageMaxCandidate) ? wageMaxCandidate : 10000;
+
+        const gradeOptions = Array.isArray(grades) && grades.length > 0
+            ? grades.map((grade) => {
+                const label = grade.label || `Grade ${grade.value}`;
+                return `<option value="${grade.value}">${label}</option>`;
+            }).join('')
+            : '<option value="0">Grade 0</option>';
+
         const body = `
             <div class="input-group">
                 <label class="input-label">Player Selection</label>
@@ -156,17 +174,13 @@ const BusinessManager = {
             <div class="input-group">
                 <label class="input-label">Grade Level</label>
                 <select class="input-field" id="gradeLevel">
-                    <option value="0">Grade 0 - Cadet</option>
-                    <option value="1">Grade 1 - Officer</option>
-                    <option value="2">Grade 2 - Sergeant</option>
-                    <option value="3">Grade 3 - Lieutenant</option>
-                    <option value="4">Grade 4 - Captain</option>
+                    ${gradeOptions}
                 </select>
             </div>
                 <div class="input-group">
                     <label class="input-label">Hourly Wage</label>
-                    <input type="number" class="input-field" id="hourlyWage" placeholder="Auto-assigned by grade" readonly style="opacity: 0.6; cursor: not-allowed;">
-                    <p style="color: var(--text-muted); font-size: 0.75rem; margin-top: 0.25rem;">Wage is automatically set based on grade from QBCore shared</p>
+                    <input type="number" class="input-field" id="hourlyWage" placeholder="Auto-assigned by grade" readonly style="opacity: 0.6; cursor: not-allowed;" min="${wageMin}" max="${wageMax}">
+                    <p style="color: var(--text-muted); font-size: 0.75rem; margin-top: 0.25rem;">Wage is automatically set based on the selected grade (${wageMin}-${wageMax})</p>
                 </div>
         `;
         this.showModal('Hire Employee', body, 'Hire');
@@ -191,6 +205,9 @@ const BusinessManager = {
                 if (Number.isFinite(wage)) {
                     $('#hourlyWage').val(wage).data('wage', wage);
                     $('#modalConfirm').data('wage', wage);
+                } else {
+                    $('#hourlyWage').val('').data('wage', null);
+                    $('#modalConfirm').data('wage', null);
                 }
             };
 
@@ -314,18 +331,37 @@ const BusinessManager = {
     handleHire() {
         const playerId = parseInt($('#playerId').val());
         const grade = parseInt($('#gradeLevel').val());
-        
+        const wage = parseInt($('#hourlyWage').val());
+        const wageLimits = typeof BusinessAPI !== 'undefined' && BusinessAPI.wageLimits
+            ? BusinessAPI.wageLimits
+            : {};
+        const wageMinCandidate = wageLimits && Number(wageLimits.min);
+        const wageMaxCandidate = wageLimits && Number(wageLimits.max);
+        const wageMin = Number.isFinite(wageMinCandidate) ? wageMinCandidate : 0;
+        const wageMax = Number.isFinite(wageMaxCandidate) ? wageMaxCandidate : 10000;
+        const grades = typeof BusinessAPI !== 'undefined' && typeof BusinessAPI.getGrades === 'function'
+            ? BusinessAPI.getGrades()
+            : [];
+        const gradeValues = grades.map(g => g.value);
+        const minGrade = gradeValues.length > 0 ? Math.min(...gradeValues) : 0;
+        const maxGrade = gradeValues.length > 0 ? Math.max(...gradeValues) : 0;
+
         // Validaciones de seguridad
         if (!playerId || !Number.isInteger(playerId) || playerId <= 0 || playerId > 9999) {
             this.showToast('Please enter a valid player ID (1-9999)', 'error');
             return;
         }
-        
-        if (grade < 0 || grade > 4 || !Number.isInteger(grade)) {
-            this.showToast('Invalid grade level (0-4)', 'error');
+
+        if (!Number.isInteger(grade) || grade < minGrade || grade > maxGrade || (gradeValues.length > 0 && !gradeValues.includes(grade))) {
+            this.showToast(`Invalid grade level (${minGrade}-${maxGrade})`, 'error');
             return;
         }
-        
+
+        if (!Number.isFinite(wage) || wage < wageMin || wage > wageMax) {
+            this.showToast(`Invalid wage amount (${wageMin}-${wageMax})`, 'error');
+            return;
+        }
+
         // Simular contratación (wage será asignado automáticamente por el servidor)
         this.showToast(`Successfully hired player ${playerId} at grade ${grade}`, 'success');
         this.hideModal();

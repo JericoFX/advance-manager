@@ -8,6 +8,10 @@ local deepClone = lib.table.deepclone
 
 local MIN_WAGE, MAX_WAGE = 0, 10000
 
+function Employees.GetWageLimits()
+    return MIN_WAGE, MAX_WAGE
+end
+
 local function normalizeCharinfo(rawCharinfo)
     local decoded = {}
 
@@ -83,6 +87,32 @@ local function sanitizeGrade(jobInfo, grade)
     end
 
     return numericGrade
+end
+
+function Employees.GetGradeMetadata(jobInfo)
+    local metadata = {}
+
+    if type(jobInfo) ~= 'table' or type(jobInfo.grades) ~= 'table' then
+        return metadata
+    end
+
+    for gradeKey, gradeData in pairs(jobInfo.grades) do
+        local numericGrade = tonumber(gradeKey)
+        if numericGrade then
+            metadata[#metadata + 1] = {
+                value = numericGrade,
+                label = gradeData.label or gradeData.name or ('Grade ' .. numericGrade),
+                wage = tonumber(gradeData.payment),
+                isboss = gradeData.isboss and true or false
+            }
+        end
+    end
+
+    table.sort(metadata, function(a, b)
+        return a.value < b.value
+    end)
+
+    return metadata
 end
 
 -- Función para cargar todos los empleados al caché
