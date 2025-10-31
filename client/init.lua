@@ -628,17 +628,11 @@ local function ShowFinancialManagementMenu(businessId)
     lib.showContext('financial_management')
 end
 
--- Commands
-lib.addCommand('createbusiness', {
-    help = 'Create a new business (Admin only)',
-    restricted = 'group.admin'
-}, function(source, args, raw)
+RegisterNetEvent('advance-manager:client:openCreateBusinessMenu', function()
     ShowCreateBusinessMenu()
 end)
 
-lib.addCommand('businessmenu', {
-    help = 'Open business management menu'
-}, function(source, args, raw)
+RegisterNetEvent('advance-manager:client:openBusinessManagementMenu', function()
     ShowBusinessManagementMenu()
 end)
 

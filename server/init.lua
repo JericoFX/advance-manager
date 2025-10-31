@@ -87,6 +87,11 @@ lib.addCommand('createbusiness', {
     },
     restricted = 'group.admin'
 }, function(source, args, raw)
+    if not args.name or not args.owner or not args.jobName then
+        TriggerClientEvent('advance-manager:client:openCreateBusinessMenu', source)
+        return
+    end
+
     local targetPlayer = QBCore.Functions.GetPlayer(args.owner)
     if not targetPlayer then
         TriggerClientEvent('ox_lib:notify', source, {
@@ -96,16 +101,16 @@ lib.addCommand('createbusiness', {
         })
         return
     end
-    
+
     local success, result = Business.Create(args.name, targetPlayer.PlayerData.citizenid, args.jobName, args.funds or 0)
-    
+
     if success then
         TriggerClientEvent('ox_lib:notify', source, {
             title = 'Success',
             description = 'Business created successfully',
             type = 'success'
         })
-        
+
         TriggerClientEvent('ox_lib:notify', args.owner, {
             title = 'Business Created',
             description = 'You are now the owner of ' .. args.name,
@@ -118,6 +123,12 @@ lib.addCommand('createbusiness', {
             type = 'error'
         })
     end
+end)
+
+lib.addCommand('businessmenu', {
+    help = 'Open business management menu'
+}, function(source)
+    TriggerClientEvent('advance-manager:client:openBusinessManagementMenu', source)
 end)
 
 -- Exports
