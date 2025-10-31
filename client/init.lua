@@ -88,7 +88,7 @@ RegisterNetEvent('QBCore:Client:OnJobUpdate', function(JobInfo)
 end)
 
 local function ensureOnFoot()
-    local vehicle = lib.cache('vehicle')
+    local vehicle = cache.vehicle
     if vehicle and vehicle ~= false then
         lib.notify({
             title = 'Unavailable',
