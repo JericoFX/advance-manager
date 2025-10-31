@@ -9,6 +9,27 @@ local round = lib.math.round
 local Business = require 'server.modules.business'
 local Employees = require 'server.modules.employees'
 
+local function hasBusinessAdminAccess(src)
+    if type(src) ~= 'number' or src < 0 then
+        return false, 'Invalid source'
+    end
+
+    if src == 0 then
+        return true
+    end
+
+    if QBCore.Functions.HasPermission(src, 'god') or QBCore.Functions.HasPermission(src, 'admin') then
+        return true
+    end
+
+    local playerId = tostring(src)
+    if IsPlayerAceAllowed(playerId, 'command') or IsPlayerAceAllowed(playerId, 'advance-manager.admin') then
+        return true
+    end
+
+    return false, 'You do not have permission to perform this action'
+end
+
 -- Function to get employee cache
 local function GetEmployeeCache()
     return deepClone(EmployeeCache)
@@ -87,8 +108,27 @@ lib.addCommand('createbusiness', {
     },
     restricted = 'group.admin'
 }, function(source, args, raw)
+    local allowed, message = hasBusinessAdminAccess(source)
+
+    if not allowed then
+        if source > 0 then
+            TriggerClientEvent('ox_lib:notify', source, {
+                title = 'Error',
+                description = message,
+                type = 'error'
+            })
+        else
+            lib.print.error('[advance-manager] createbusiness command rejected: ' .. (message or 'no permission'))
+        end
+        return
+    end
+
     if not args.name or not args.owner or not args.jobName then
-        TriggerClientEvent('advance-manager:client:openCreateBusinessMenu', source)
+        if source > 0 then
+            TriggerClientEvent('advance-manager:client:openCreateBusinessMenu', source)
+        else
+            lib.print.warn('[advance-manager] Console usage of /createbusiness requires all parameters.')
+        end
         return
     end
 
@@ -128,6 +168,16 @@ end)
 lib.addCommand('businessmenu', {
     help = 'Open business management menu'
 }, function(source)
+    if source <= 0 then
+        lib.print.warn('[advance-manager] Console cannot open the business management menu.')
+        return
+    end
+
+    local Player = QBCore.Functions.GetPlayer(source)
+    if not Player then
+        return
+    end
+
     TriggerClientEvent('advance-manager:client:openBusinessManagementMenu', source)
 end)
 
@@ -314,9 +364,36 @@ lib.callback.register('advance-manager:getPlayerBusiness', function(source)
     return nil
 end)
 
+lib.callback.register('advance-manager:canCreateBusiness', function(source)
+    if source <= 0 then
+        return false, 'This action is only available in-game'
+    end
+
+    local Player = QBCore.Functions.GetPlayer(source)
+    if not Player then
+        return false, 'Player not found'
+    end
+
+    local allowed, message = hasBusinessAdminAccess(source)
+    if not allowed then
+        return false, message
+    end
+
+    return true
+end)
+
 lib.callback.register('advance-manager:getAvailableJobs', function(source)
+    if source <= 0 then
+        return false, 'This action is only available in-game'
+    end
+
+    local allowed, message = hasBusinessAdminAccess(source)
+    if not allowed then
+        return false, message
+    end
+
     local jobs = {}
-    
+
     for jobName, jobData in pairs(QBCore.Shared.Jobs) do
         table.insert(jobs, {
             name = jobName,
@@ -417,18 +494,51 @@ end)
 -- Server events
 RegisterNetEvent('advance-manager:createBusinessFromClient', function(name, ownerId, jobName, funds)
     local src = source
-    
-    -- Verify admin permission
-    if not QBCore.Functions.HasPermission(src, 'admin') then
+
+    if not QBCore.Functions.GetPlayer(src) then
+        return
+    end
+
+    local allowed, message = hasBusinessAdminAccess(src)
+    if not allowed then
         TriggerClientEvent('ox_lib:notify', src, {
             title = 'Error',
-            description = 'You do not have permission to create businesses',
+            description = message or 'You do not have permission to create businesses',
             type = 'error'
         })
         return
     end
-    
-    local targetPlayer = QBCore.Functions.GetPlayer(ownerId)
+
+    local sanitizedName = type(name) == 'string' and name:gsub('%s+', ' '):gsub('^%s*(.-)%s*$', '%1') or nil
+    if not sanitizedName or sanitizedName == '' then
+        TriggerClientEvent('ox_lib:notify', src, {
+            title = 'Error',
+            description = 'A business name is required',
+            type = 'error'
+        })
+        return
+    end
+
+    if #sanitizedName > 120 then
+        TriggerClientEvent('ox_lib:notify', src, {
+            title = 'Error',
+            description = 'Business name is too long',
+            type = 'error'
+        })
+        return
+    end
+
+    local parsedOwnerId = tonumber(ownerId)
+    if not parsedOwnerId then
+        TriggerClientEvent('ox_lib:notify', src, {
+            title = 'Error',
+            description = 'Invalid owner ID',
+            type = 'error'
+        })
+        return
+    end
+
+    local targetPlayer = QBCore.Functions.GetPlayer(parsedOwnerId)
     if not targetPlayer then
         TriggerClientEvent('ox_lib:notify', src, {
             title = 'Error',
@@ -437,19 +547,46 @@ RegisterNetEvent('advance-manager:createBusinessFromClient', function(name, owne
         })
         return
     end
-    
-    local success, result = Business.Create(name, targetPlayer.PlayerData.citizenid, jobName, funds or 0)
-    
+
+    local jobKey = type(jobName) == 'string' and jobName or nil
+    if jobKey and not QBCore.Shared.Jobs[jobKey] and jobKey:lower() ~= jobKey then
+        local lower = jobKey:lower()
+        if QBCore.Shared.Jobs[lower] then
+            jobKey = lower
+        end
+    end
+
+    if not jobKey or not QBCore.Shared.Jobs[jobKey] then
+        TriggerClientEvent('ox_lib:notify', src, {
+            title = 'Error',
+            description = 'Invalid job name',
+            type = 'error'
+        })
+        return
+    end
+
+    local startingFunds = round(tonumber(funds) or 0)
+    if startingFunds < 0 then
+        TriggerClientEvent('ox_lib:notify', src, {
+            title = 'Error',
+            description = 'Starting funds cannot be negative',
+            type = 'error'
+        })
+        return
+    end
+
+    local success, result = Business.Create(sanitizedName, targetPlayer.PlayerData.citizenid, jobKey, startingFunds)
+
     if success then
         TriggerClientEvent('ox_lib:notify', src, {
             title = 'Success',
             description = 'Business created successfully',
             type = 'success'
         })
-        
-        TriggerClientEvent('ox_lib:notify', ownerId, {
+
+        TriggerClientEvent('ox_lib:notify', parsedOwnerId, {
             title = 'Business Created',
-            description = 'You are now the owner of ' .. name,
+            description = 'You are now the owner of ' .. sanitizedName,
             type = 'success'
         })
     else
