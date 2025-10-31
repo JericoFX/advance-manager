@@ -107,12 +107,23 @@ local function ShowCreateBusinessMenu()
         return
     end
 
-    local availableJobs = lib.callback.await('advance-manager:getAvailableJobs', false)
-    
+    local canOpen, errorMessage = lib.callback.await('advance-manager:canCreateBusiness', false)
+
+    if not canOpen then
+        lib.notify({
+            title = 'Unavailable',
+            description = errorMessage or 'You do not have permission to create businesses',
+            type = 'error'
+        })
+        return
+    end
+
+    local availableJobs, jobsError = lib.callback.await('advance-manager:getAvailableJobs', false)
+
     if not availableJobs then
         lib.notify({
             title = 'Error',
-            description = 'Failed to load available jobs',
+            description = jobsError or 'Failed to load available jobs',
             type = 'error'
         })
         return
@@ -628,17 +639,11 @@ local function ShowFinancialManagementMenu(businessId)
     lib.showContext('financial_management')
 end
 
--- Commands
-lib.addCommand('createbusiness', {
-    help = 'Create a new business (Admin only)',
-    restricted = 'group.admin'
-}, function(source, args, raw)
+RegisterNetEvent('advance-manager:client:openCreateBusinessMenu', function()
     ShowCreateBusinessMenu()
 end)
 
-lib.addCommand('businessmenu', {
-    help = 'Open business management menu'
-}, function(source, args, raw)
+RegisterNetEvent('advance-manager:client:openBusinessManagementMenu', function()
     ShowBusinessManagementMenu()
 end)
 
