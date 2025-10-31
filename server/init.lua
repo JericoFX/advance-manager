@@ -108,9 +108,6 @@ lib.addCommand('createbusiness', {
     },
     restricted = 'group.admin'
 }, function(source, args, raw)
-    local allowed, message = hasBusinessAdminAccess(source)
-
-    if not allowed then
         if source > 0 then
             TriggerClientEvent('ox_lib:notify', source, {
                 title = 'Error',
@@ -121,7 +118,6 @@ lib.addCommand('createbusiness', {
             lib.print.error('[advance-manager] createbusiness command rejected: ' .. (message or 'no permission'))
         end
         return
-    end
 
     if not args.name or not args.owner or not args.jobName then
         if source > 0 then

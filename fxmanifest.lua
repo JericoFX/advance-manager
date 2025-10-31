@@ -5,7 +5,7 @@ lua54 'yes'
 name 'advance-manager'
 author 'JericoFX'
 description 'Advanced Business Management System for FiveM'
-version '0.0.1'
+version '0.0.2'
 
 shared_scripts {
     '@ox_lib/init.lua',

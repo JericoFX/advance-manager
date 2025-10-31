@@ -640,10 +640,12 @@ local function ShowFinancialManagementMenu(businessId)
 end
 
 RegisterNetEvent('advance-manager:client:openCreateBusinessMenu', function()
+    if source == "" or soruce == 0 then return end
     ShowCreateBusinessMenu()
 end)
 
 RegisterNetEvent('advance-manager:client:openBusinessManagementMenu', function()
+    if source == "" or soruce == 0 then return end
     ShowBusinessManagementMenu()
 end)
 

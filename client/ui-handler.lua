@@ -5,26 +5,9 @@ local isUIOpen = false
 
 -- Función para obtener el jugador más cercano
 local function getNearestPlayer()
-    local playerPed = PlayerPedId()
-    local playerCoords = GetEntityCoords(playerPed)
-    local players = GetActivePlayers()
-    local closestPlayer = nil
-    local closestDistance = math.huge
-    
-    for _, player in pairs(players) do
-        if player ~= PlayerId() then
-            local targetPed = GetPlayerPed(player)
-            local targetCoords = GetEntityCoords(targetPed)
-            local distance = #(playerCoords - targetCoords)
-            
-            if distance < closestDistance and distance < 5.0 then
-                closestDistance = distance
-                closestPlayer = GetPlayerServerId(player)
-            end
-        end
-    end
-    
-    return closestPlayer
+    local coords = GetEntityCoords(cache.ped)
+    local _, playerPed, coords = lib.getClosestPlayer(coords, 10.0, false)
+    return playerPed
 end
 
 -- Configurar NUI callbacks
