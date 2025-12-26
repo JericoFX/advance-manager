@@ -252,6 +252,11 @@ function Business.UpdateFunds(businessId, amount, isWithdrawal)
     return result > 0
 end
 
+function Business.WithdrawFunds(businessId, amount)
+    local result = MySQL.update.await('UPDATE businesses SET funds = funds - ? WHERE id = ? AND funds >= ?', {amount, businessId, amount})
+    return result > 0
+end
+
 function Business.SetFunds(businessId, amount)
     local result = MySQL.update.await('UPDATE businesses SET funds = ? WHERE id = ?', {amount, businessId})
     return result > 0

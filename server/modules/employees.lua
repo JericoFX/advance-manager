@@ -104,6 +104,14 @@ local function sanitizeGrade(jobInfo, grade)
     return numericGrade
 end
 
+local function getEmployeeWageFromDb(businessId, citizenId)
+    local result = MySQL.query.await('SELECT wage FROM business_employees WHERE business_id = ? AND citizenid = ?', {businessId, citizenId})
+    if result and result[1] and result[1].wage ~= nil then
+        return tonumber(result[1].wage)
+    end
+    return nil
+end
+
 function Employees.GetGradeMetadata(jobInfo)
     local metadata = {}
 
@@ -364,7 +372,8 @@ function Employees.UpdateGrade(businessId, citizenId, newGrade)
     end
 
     local employee = Employees.GetByBusinessAndCitizen(businessId, citizenId)
-    local resolvedWage = resolveGradeWage(jobInfo, sanitizedGrade, employee and employee.wage)
+    local fallbackWage = employee and employee.wage or getEmployeeWageFromDb(businessId, citizenId)
+    local resolvedWage = resolveGradeWage(jobInfo, sanitizedGrade, fallbackWage)
 
     -- Update database
     local result = MySQL.update.await([[ 
