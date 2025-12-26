@@ -9,6 +9,53 @@ local round = lib.math.round
 local Business = require 'server.modules.business'
 local Employees = require 'server.modules.employees'
 
+-- PR-MERGE: TODO: add PR identifier for business transaction hardening to avoid merge conflicts.
+local Cooldowns = {}
+local COOLDOWN_INTERVALS = {
+    getBusinessEmployees = 500,
+    hireEmployee = 1000,
+    fireEmployee = 1000,
+    updateEmployeeWage = 1000,
+    updateEmployeeGrade = 1000,
+    depositFunds = 1000,
+    withdrawFunds = 1000,
+    getBusinessFunds = 500
+}
+
+local function getTimeMs()
+    if GetGameTimer then
+        return GetGameTimer()
+    end
+
+    return math.floor(os.clock() * 1000)
+end
+
+local function checkCooldown(source, action)
+    local interval = COOLDOWN_INTERVALS[action]
+    if not interval then
+        return true
+    end
+
+    local now = getTimeMs()
+    local playerCooldowns = Cooldowns[source]
+    if not playerCooldowns then
+        playerCooldowns = {}
+        Cooldowns[source] = playerCooldowns
+    end
+
+    local nextAllowed = playerCooldowns[action] or 0
+    if now < nextAllowed then
+        return false
+    end
+
+    playerCooldowns[action] = now + interval
+    return true
+end
+
+AddEventHandler('playerDropped', function()
+    Cooldowns[source] = nil
+end)
+
 local function hasBusinessAdminAccess(src)
     if type(src) ~= 'number' or src < 0 then
         return false, 'Invalid source'
@@ -249,6 +296,10 @@ end)
 -- Employee management callbacks
 lib.callback.register('advance-manager:getBusinessEmployees', function(source, businessId)
     local src = source
+    if not checkCooldown(src, 'getBusinessEmployees') then
+        return false
+    end
+
     local Player = QBCore.Functions.GetPlayer(src)
     
     if not Player or not Business.IsBoss(Player.PlayerData.citizenid, businessId) then
@@ -260,6 +311,10 @@ end)
 
 lib.callback.register('advance-manager:hireEmployee', function(source, businessId, targetId, grade, wage)
     local src = source
+    if not checkCooldown(src, 'hireEmployee') then
+        return false, 'Please wait before hiring another employee'
+    end
+
     local Player = QBCore.Functions.GetPlayer(src)
     local TargetPlayer = QBCore.Functions.GetPlayer(targetId)
     
@@ -276,6 +331,10 @@ end)
 
 lib.callback.register('advance-manager:fireEmployee', function(source, businessId, citizenId)
     local src = source
+    if not checkCooldown(src, 'fireEmployee') then
+        return false, 'Please wait before firing another employee'
+    end
+
     local Player = QBCore.Functions.GetPlayer(src)
     
     if not Player or not Business.IsBoss(Player.PlayerData.citizenid, businessId) then
@@ -287,6 +346,10 @@ end)
 
 lib.callback.register('advance-manager:updateEmployeeWage', function(source, businessId, citizenId, newWage)
     local src = source
+    if not checkCooldown(src, 'updateEmployeeWage') then
+        return false
+    end
+
     local Player = QBCore.Functions.GetPlayer(src)
     
     if not Player or not Business.IsBoss(Player.PlayerData.citizenid, businessId) then
@@ -298,6 +361,10 @@ end)
 
 lib.callback.register('advance-manager:updateEmployeeGrade', function(source, businessId, citizenId, newGrade)
     local src = source
+    if not checkCooldown(src, 'updateEmployeeGrade') then
+        return false
+    end
+
     local Player = QBCore.Functions.GetPlayer(src)
     
     if not Player or not Business.IsBoss(Player.PlayerData.citizenid, businessId) then
@@ -357,6 +424,10 @@ lib.callback.register('advance-manager:getPlayerBusiness', function(source)
     -- Check if player works for a business
     local business = Business.GetByJob(Player.PlayerData.job.name)
     if business then
+        if not Employees.IsEmployeeOfBusiness(business.id, Player.PlayerData.citizenid) then
+            return nil
+        end
+
         return enrichBusinessPayload(business)
     end
 
@@ -406,6 +477,10 @@ end)
 
 lib.callback.register('advance-manager:depositFunds', function(source, businessId, amount)
     local src = source
+    if not checkCooldown(src, 'depositFunds') then
+        return false, 'Please wait before making another deposit'
+    end
+
     local Player = QBCore.Functions.GetPlayer(src)
 
     if not Player then
@@ -444,6 +519,10 @@ end)
 
 lib.callback.register('advance-manager:withdrawFunds', function(source, businessId, amount)
     local src = source
+    if not checkCooldown(src, 'withdrawFunds') then
+        return false, 'Please wait before making another withdrawal'
+    end
+
     local Player = QBCore.Functions.GetPlayer(src)
 
     if not Player then
@@ -459,24 +538,22 @@ lib.callback.register('advance-manager:withdrawFunds', function(source, business
         return false, 'Invalid amount'
     end
 
-    -- Check if business has enough money
-    local businessFunds = Business.GetFunds(businessId)
-    if businessFunds < amount then
-        return false, 'Insufficient business funds'
-    end
-    
-    -- Remove money from business
-    if Business.UpdateFunds(businessId, amount, true) then
+    -- Remove money from business (atomic)
+    if Business.WithdrawFunds(businessId, amount) then
         -- Add money to player
         Player.Functions.AddMoney('cash', amount)
         return true, 'Funds withdrawn successfully'
     else
-        return false, 'Failed to withdraw funds'
+        return false, 'Insufficient business funds'
     end
 end)
 
 lib.callback.register('advance-manager:getBusinessFunds', function(source, businessId)
     local src = source
+    if not checkCooldown(src, 'getBusinessFunds') then
+        return false
+    end
+
     local Player = QBCore.Functions.GetPlayer(src)
     
     if not Player then
@@ -598,4 +675,3 @@ RegisterNetEvent('advance-manager:createBusinessFromClient', function(name, owne
 end)
 
 print('[advance-manager] Server initialized successfully')
-
