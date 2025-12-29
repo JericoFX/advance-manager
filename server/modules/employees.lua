@@ -231,7 +231,17 @@ end
 -- Función para verificar si un ciudadano es empleado de un negocio
 function Employees.IsEmployeeOfBusiness(businessId, citizenId)
     local employee = Employees.GetByBusinessAndCitizen(businessId, citizenId)
-    return employee ~= nil
+    if employee then
+        return true
+    end
+
+    local result = MySQL.query.await('SELECT id FROM business_employees WHERE business_id = ? AND citizenid = ? LIMIT 1', {businessId, citizenId})
+    if result and result[1] then
+        Employees.RefreshCache(businessId)
+        return true
+    end
+
+    return false
 end
 
 -- Función para obtener el grado de un empleado

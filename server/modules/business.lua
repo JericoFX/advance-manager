@@ -193,6 +193,11 @@ function Business.Create(name, owner, jobName, startingFunds, metadata)
     if not jobInfo then
         return false, 'Job does not exist'
     end
+
+    local existing = Business.GetByJob(jobName)
+    if existing then
+        return false, 'Job already assigned to another business'
+    end
     
     local result = MySQL.insert.await([[
         INSERT INTO businesses (name, owner, job_name, funds, metadata)
