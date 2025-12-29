@@ -9,7 +9,7 @@ local round = lib.math.round
 local Business = require 'server.modules.business'
 local Employees = require 'server.modules.employees'
 
--- PR-MERGE: TODO: add PR identifier for business transaction hardening to avoid merge conflicts.
+-- PR-MERGE: harden-business-permissions
 local Cooldowns = {}
 local COOLDOWN_INTERVALS = {
     getBusinessEmployees = 500,
@@ -70,11 +70,49 @@ local function hasBusinessAdminAccess(src)
     end
 
     local playerId = tostring(src)
-    if IsPlayerAceAllowed(playerId, 'command') or IsPlayerAceAllowed(playerId, 'advance-manager.admin') then
+    if IsPlayerAceAllowed(playerId, 'advance-manager.admin') then
         return true
     end
 
     return false, 'You do not have permission to perform this action'
+end
+
+local function hasBossAccessToBusiness(Player, businessId)
+    if not Player then
+        return false
+    end
+
+    local business = Business.GetById(businessId)
+    if not business then
+        return false
+    end
+
+    local citizenId = Player.PlayerData and Player.PlayerData.citizenid
+    if not citizenId then
+        return false
+    end
+
+    if business.owner == citizenId then
+        return true
+    end
+
+    if Player.PlayerData.job.name ~= business.job_name then
+        return false
+    end
+
+    if not Employees.IsEmployeeOfBusiness(businessId, citizenId) then
+        return false
+    end
+
+    local jobInfo = Business.GetJobInfo(business.job_name)
+    if not jobInfo then
+        return false
+    end
+
+    local grade = Player.PlayerData.job.grade.level
+    local gradeData = jobInfo.grades and jobInfo.grades[tostring(grade)]
+
+    return gradeData and gradeData.isboss or false
 end
 
 -- Function to get employee cache
@@ -302,7 +340,7 @@ lib.callback.register('advance-manager:getBusinessEmployees', function(source, b
 
     local Player = QBCore.Functions.GetPlayer(src)
     
-    if not Player or not Business.IsBoss(Player.PlayerData.citizenid, businessId) then
+    if not hasBossAccessToBusiness(Player, businessId) then
         return false
     end
     
@@ -322,7 +360,7 @@ lib.callback.register('advance-manager:hireEmployee', function(source, businessI
         return false, 'Player not found'
     end
     
-    if not Business.IsBoss(Player.PlayerData.citizenid, businessId) then
+    if not hasBossAccessToBusiness(Player, businessId) then
         return false, 'No permission'
     end
     
@@ -337,7 +375,7 @@ lib.callback.register('advance-manager:fireEmployee', function(source, businessI
 
     local Player = QBCore.Functions.GetPlayer(src)
     
-    if not Player or not Business.IsBoss(Player.PlayerData.citizenid, businessId) then
+    if not hasBossAccessToBusiness(Player, businessId) then
         return false, 'No permission'
     end
     
@@ -352,7 +390,7 @@ lib.callback.register('advance-manager:updateEmployeeWage', function(source, bus
 
     local Player = QBCore.Functions.GetPlayer(src)
     
-    if not Player or not Business.IsBoss(Player.PlayerData.citizenid, businessId) then
+    if not hasBossAccessToBusiness(Player, businessId) then
         return false
     end
     
@@ -367,7 +405,7 @@ lib.callback.register('advance-manager:updateEmployeeGrade', function(source, bu
 
     local Player = QBCore.Functions.GetPlayer(src)
     
-    if not Player or not Business.IsBoss(Player.PlayerData.citizenid, businessId) then
+    if not hasBossAccessToBusiness(Player, businessId) then
         return false
     end
     
@@ -487,7 +525,7 @@ lib.callback.register('advance-manager:depositFunds', function(source, businessI
         return false, 'Player not found'
     end
 
-    if not Business.IsBoss(Player.PlayerData.citizenid, businessId) then
+    if not hasBossAccessToBusiness(Player, businessId) then
         return false, 'No permission'
     end
 
@@ -529,7 +567,7 @@ lib.callback.register('advance-manager:withdrawFunds', function(source, business
         return false, 'Player not found'
     end
 
-    if not Business.IsBoss(Player.PlayerData.citizenid, businessId) then
+    if not hasBossAccessToBusiness(Player, businessId) then
         return false, 'No permission'
     end
 
@@ -541,8 +579,16 @@ lib.callback.register('advance-manager:withdrawFunds', function(source, business
     -- Remove money from business (atomic)
     if Business.WithdrawFunds(businessId, amount) then
         -- Add money to player
-        Player.Functions.AddMoney('cash', amount)
-        return true, 'Funds withdrawn successfully'
+        if Player.Functions.AddMoney('cash', amount) then
+            return true, 'Funds withdrawn successfully'
+        end
+
+        local rollback = Business.UpdateFunds(businessId, amount, false)
+        if not rollback then
+            lib.print.error(('[advance-manager] Failed to rollback withdrawal for business %s'):format(businessId))
+        end
+
+        return false, 'Failed to add money to player'
     else
         return false, 'Insufficient business funds'
     end
@@ -560,7 +606,7 @@ lib.callback.register('advance-manager:getBusinessFunds', function(source, busin
         return false
     end
     
-    if not Business.IsBoss(Player.PlayerData.citizenid, businessId) then
+    if not hasBossAccessToBusiness(Player, businessId) then
         return false
     end
     

@@ -6,8 +6,12 @@ local isUIOpen = false
 -- Función para obtener el jugador más cercano
 local function getNearestPlayer()
     local coords = GetEntityCoords(cache.ped)
-    local _, playerPed, coords = lib.getClosestPlayer(coords, 10.0, false)
-    return playerPed
+    local playerId = lib.getClosestPlayer(coords, 10.0, false)
+    if not playerId then
+        return nil
+    end
+
+    return GetPlayerServerId(playerId)
 end
 
 -- Configurar NUI callbacks
