@@ -9,7 +9,8 @@ const BusinessManager = {
     init() {
         this.bindEvents();
 
-        const shouldAutoOpen = typeof FiveMCallbacks === 'undefined' || !FiveMCallbacks.isFiveM;
+        const shouldAutoOpen = typeof GetParentResourceName === 'undefined'
+            || (typeof FiveMCallbacks !== 'undefined' && !FiveMCallbacks.isFiveM);
 
         if (shouldAutoOpen) {
             this.showPanel(); // Para testing en navegador
