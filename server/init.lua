@@ -19,7 +19,8 @@ local COOLDOWN_INTERVALS = {
     updateEmployeeGrade = 1000,
     depositFunds = 1000,
     withdrawFunds = 1000,
-    getBusinessFunds = 500
+    getBusinessFunds = 500,
+    createBusinessFromClient = 2000
 }
 
 local function getTimeMs()
@@ -113,6 +114,40 @@ local function hasBossAccessToBusiness(Player, businessId)
     local gradeData = jobInfo.grades and jobInfo.grades[tostring(grade)]
 
     return gradeData and gradeData.isboss or false
+end
+
+-- Implements: IDEA-01 – server-side schema validation for business actions
+-- Implements: IDEA-02 – enforce authorization checks for business actions
+-- Implements: IDEA-03 – rate limiting for sensitive events
+local function normalizeBusinessId(businessId)
+    local numericId = tonumber(businessId)
+    if not numericId or numericId <= 0 then
+        return nil
+    end
+
+    return math.floor(numericId)
+end
+
+local function normalizeCitizenId(citizenId)
+    if type(citizenId) ~= 'string' then
+        return nil
+    end
+
+    local sanitized = citizenId:match('^%s*(.-)%s*$')
+    if sanitized == '' then
+        return nil
+    end
+
+    return sanitized
+end
+
+local function normalizeAmount(amount)
+    local numericAmount = tonumber(amount)
+    if not numericAmount then
+        return nil
+    end
+
+    return round(numericAmount)
 end
 
 -- Function to get employee cache
@@ -338,13 +373,18 @@ lib.callback.register('advance-manager:getBusinessEmployees', function(source, b
         return false
     end
 
+    local normalizedBusinessId = normalizeBusinessId(businessId)
+    if not normalizedBusinessId then
+        return false
+    end
+
     local Player = QBCore.Functions.GetPlayer(src)
     
-    if not hasBossAccessToBusiness(Player, businessId) then
+    if not hasBossAccessToBusiness(Player, normalizedBusinessId) then
         return false
     end
     
-    return Employees.GetAll(businessId)
+    return Employees.GetAll(normalizedBusinessId)
 end)
 
 lib.callback.register('advance-manager:hireEmployee', function(source, businessId, targetId, grade, wage)
@@ -353,18 +393,30 @@ lib.callback.register('advance-manager:hireEmployee', function(source, businessI
         return false, 'Please wait before hiring another employee'
     end
 
+    local normalizedBusinessId = normalizeBusinessId(businessId)
+    local normalizedTargetId = tonumber(targetId)
+    if not normalizedBusinessId or not normalizedTargetId or normalizedTargetId <= 0 then
+        return false, 'Invalid request'
+    end
+
+    local numericGrade = tonumber(grade)
+    local numericWage = tonumber(wage)
+    if not numericGrade or not numericWage or numericWage < 0 then
+        return false, 'Invalid request'
+    end
+
     local Player = QBCore.Functions.GetPlayer(src)
-    local TargetPlayer = QBCore.Functions.GetPlayer(targetId)
+    local TargetPlayer = QBCore.Functions.GetPlayer(normalizedTargetId)
     
     if not Player or not TargetPlayer then
         return false, 'Player not found'
     end
     
-    if not hasBossAccessToBusiness(Player, businessId) then
+    if not hasBossAccessToBusiness(Player, normalizedBusinessId) then
         return false, 'No permission'
     end
     
-    return Employees.Hire(businessId, TargetPlayer.PlayerData.citizenid, grade, wage)
+    return Employees.Hire(normalizedBusinessId, TargetPlayer.PlayerData.citizenid, numericGrade, numericWage)
 end)
 
 lib.callback.register('advance-manager:fireEmployee', function(source, businessId, citizenId)
@@ -373,13 +425,19 @@ lib.callback.register('advance-manager:fireEmployee', function(source, businessI
         return false, 'Please wait before firing another employee'
     end
 
+    local normalizedBusinessId = normalizeBusinessId(businessId)
+    local normalizedCitizenId = normalizeCitizenId(citizenId)
+    if not normalizedBusinessId or not normalizedCitizenId then
+        return false, 'Invalid request'
+    end
+
     local Player = QBCore.Functions.GetPlayer(src)
     
-    if not hasBossAccessToBusiness(Player, businessId) then
+    if not hasBossAccessToBusiness(Player, normalizedBusinessId) then
         return false, 'No permission'
     end
     
-    return Employees.Fire(businessId, citizenId)
+    return Employees.Fire(normalizedBusinessId, normalizedCitizenId)
 end)
 
 lib.callback.register('advance-manager:updateEmployeeWage', function(source, businessId, citizenId, newWage)
@@ -388,13 +446,20 @@ lib.callback.register('advance-manager:updateEmployeeWage', function(source, bus
         return false
     end
 
+    local normalizedBusinessId = normalizeBusinessId(businessId)
+    local normalizedCitizenId = normalizeCitizenId(citizenId)
+    local normalizedWage = tonumber(newWage)
+    if not normalizedBusinessId or not normalizedCitizenId or not normalizedWage or normalizedWage < 0 then
+        return false
+    end
+
     local Player = QBCore.Functions.GetPlayer(src)
     
-    if not hasBossAccessToBusiness(Player, businessId) then
+    if not hasBossAccessToBusiness(Player, normalizedBusinessId) then
         return false
     end
     
-    return Employees.UpdateWage(businessId, citizenId, newWage)
+    return Employees.UpdateWage(normalizedBusinessId, normalizedCitizenId, normalizedWage)
 end)
 
 lib.callback.register('advance-manager:updateEmployeeGrade', function(source, businessId, citizenId, newGrade)
@@ -403,13 +468,20 @@ lib.callback.register('advance-manager:updateEmployeeGrade', function(source, bu
         return false
     end
 
+    local normalizedBusinessId = normalizeBusinessId(businessId)
+    local normalizedCitizenId = normalizeCitizenId(citizenId)
+    local normalizedGrade = tonumber(newGrade)
+    if not normalizedBusinessId or not normalizedCitizenId or normalizedGrade == nil then
+        return false
+    end
+
     local Player = QBCore.Functions.GetPlayer(src)
     
-    if not hasBossAccessToBusiness(Player, businessId) then
+    if not hasBossAccessToBusiness(Player, normalizedBusinessId) then
         return false
     end
     
-    return Employees.UpdateGrade(businessId, citizenId, newGrade)
+    return Employees.UpdateGrade(normalizedBusinessId, normalizedCitizenId, normalizedGrade)
 end)
 
 local function enrichBusinessPayload(business)
@@ -519,35 +591,40 @@ lib.callback.register('advance-manager:depositFunds', function(source, businessI
         return false, 'Please wait before making another deposit'
     end
 
+    local normalizedBusinessId = normalizeBusinessId(businessId)
+    local normalizedAmount = normalizeAmount(amount)
+    if not normalizedBusinessId or not normalizedAmount then
+        return false, 'Invalid amount'
+    end
+
     local Player = QBCore.Functions.GetPlayer(src)
 
     if not Player then
         return false, 'Player not found'
     end
 
-    if not hasBossAccessToBusiness(Player, businessId) then
+    if not hasBossAccessToBusiness(Player, normalizedBusinessId) then
         return false, 'No permission'
     end
 
-    amount = round(amount or 0)
-    if amount <= 0 then
+    if normalizedAmount <= 0 then
         return false, 'Invalid amount'
     end
 
     -- Check if player has enough money
     local playerMoney = Player.Functions.GetMoney('cash')
-    if playerMoney < amount then
+    if playerMoney < normalizedAmount then
         return false, 'Insufficient funds'
     end
     
     -- Remove money from player
-    if Player.Functions.RemoveMoney('cash', amount) then
+    if Player.Functions.RemoveMoney('cash', normalizedAmount) then
         -- Add money to business
-        if Business.UpdateFunds(businessId, amount, false) then
+        if Business.UpdateFunds(normalizedBusinessId, normalizedAmount, false) then
             return true, 'Funds deposited successfully'
         else
             -- If business update fails, return money to player
-            Player.Functions.AddMoney('cash', amount)
+            Player.Functions.AddMoney('cash', normalizedAmount)
             return false, 'Failed to deposit funds'
         end
     else
@@ -561,31 +638,36 @@ lib.callback.register('advance-manager:withdrawFunds', function(source, business
         return false, 'Please wait before making another withdrawal'
     end
 
+    local normalizedBusinessId = normalizeBusinessId(businessId)
+    local normalizedAmount = normalizeAmount(amount)
+    if not normalizedBusinessId or not normalizedAmount then
+        return false, 'Invalid amount'
+    end
+
     local Player = QBCore.Functions.GetPlayer(src)
 
     if not Player then
         return false, 'Player not found'
     end
 
-    if not hasBossAccessToBusiness(Player, businessId) then
+    if not hasBossAccessToBusiness(Player, normalizedBusinessId) then
         return false, 'No permission'
     end
 
-    amount = round(amount or 0)
-    if amount <= 0 then
+    if normalizedAmount <= 0 then
         return false, 'Invalid amount'
     end
 
     -- Remove money from business (atomic)
-    if Business.WithdrawFunds(businessId, amount) then
+    if Business.WithdrawFunds(normalizedBusinessId, normalizedAmount) then
         -- Add money to player
-        if Player.Functions.AddMoney('cash', amount) then
+        if Player.Functions.AddMoney('cash', normalizedAmount) then
             return true, 'Funds withdrawn successfully'
         end
 
-        local rollback = Business.UpdateFunds(businessId, amount, false)
+        local rollback = Business.UpdateFunds(normalizedBusinessId, normalizedAmount, false)
         if not rollback then
-            lib.print.error(('[advance-manager] Failed to rollback withdrawal for business %s'):format(businessId))
+            lib.print.error(('[advance-manager] Failed to rollback withdrawal for business %s'):format(normalizedBusinessId))
         end
 
         return false, 'Failed to add money to player'
@@ -600,22 +682,36 @@ lib.callback.register('advance-manager:getBusinessFunds', function(source, busin
         return false
     end
 
+    local normalizedBusinessId = normalizeBusinessId(businessId)
+    if not normalizedBusinessId then
+        return false
+    end
+
     local Player = QBCore.Functions.GetPlayer(src)
     
     if not Player then
         return false
     end
     
-    if not hasBossAccessToBusiness(Player, businessId) then
+    if not hasBossAccessToBusiness(Player, normalizedBusinessId) then
         return false
     end
     
-    return Business.GetFunds(businessId)
+    return Business.GetFunds(normalizedBusinessId)
 end)
 
 -- Server events
 RegisterNetEvent('advance-manager:createBusinessFromClient', function(name, ownerId, jobName, funds)
     local src = source
+
+    if not checkCooldown(src, 'createBusinessFromClient') then
+        TriggerClientEvent('ox_lib:notify', src, {
+            title = 'Error',
+            description = 'Please wait before creating another business',
+            type = 'error'
+        })
+        return
+    end
 
     if not QBCore.Functions.GetPlayer(src) then
         return
@@ -687,7 +783,7 @@ RegisterNetEvent('advance-manager:createBusinessFromClient', function(name, owne
         return
     end
 
-    local startingFunds = round(tonumber(funds) or 0)
+    local startingFunds = normalizeAmount(funds) or 0
     if startingFunds < 0 then
         TriggerClientEvent('ox_lib:notify', src, {
             title = 'Error',

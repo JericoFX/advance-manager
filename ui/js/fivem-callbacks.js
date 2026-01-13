@@ -295,6 +295,7 @@ const FiveMCallbacks = {
         return this.allowedCallbacks.includes(callbackName);
     },
     
+    // Implements: IDEA-05 – align UI payload contracts with shared job data
     // Validar datos de entrada
     validateInput(data) {
         if (typeof data !== 'object' || data === null) {
@@ -302,27 +303,76 @@ const FiveMCallbacks = {
         }
         
         // Validar campos numéricos
-        if (data.amount && (!Number.isInteger(data.amount) || data.amount <= 0)) {
-            return false;
+        if (data.amount !== undefined) {
+            const amount = Number(data.amount);
+            if (!Number.isFinite(amount) || amount <= 0) {
+                return false;
+            }
         }
         
-        if (data.playerId !== undefined && (!Number.isInteger(data.playerId) || data.playerId <= 0)) {
-            return false;
+        const gradeDefinitions = typeof BusinessAPI !== 'undefined' && Array.isArray(BusinessAPI.gradeDefinitions)
+            ? BusinessAPI.gradeDefinitions
+            : [];
+        const gradeValues = gradeDefinitions.map((entry) => Number(entry.value)).filter(Number.isFinite);
+        const minGrade = gradeValues.length > 0 ? Math.min(...gradeValues) : 0;
+        const maxGrade = gradeValues.length > 0 ? Math.max(...gradeValues) : Number.MAX_SAFE_INTEGER;
+        const allowedGrades = gradeValues.length > 0 ? new Set(gradeValues) : null;
+
+        const wageLimits = typeof BusinessAPI !== 'undefined' && BusinessAPI.wageLimits
+            ? BusinessAPI.wageLimits
+            : { min: 0, max: Number.MAX_SAFE_INTEGER };
+        const minWage = Number.isFinite(Number(wageLimits.min)) ? Number(wageLimits.min) : 0;
+        const maxWage = Number.isFinite(Number(wageLimits.max)) ? Number(wageLimits.max) : Number.MAX_SAFE_INTEGER;
+
+        if (data.playerId !== undefined) {
+            const playerId = Number(data.playerId);
+            if (!Number.isInteger(playerId) || playerId <= 0) {
+                return false;
+            }
         }
 
-        if (data.grade !== undefined && (!Number.isInteger(data.grade) || data.grade < 0 || data.grade > 4)) {
-            return false;
+        if (data.grade !== undefined) {
+            const grade = Number(data.grade);
+            if (!Number.isInteger(grade) || grade < minGrade || grade > maxGrade) {
+                return false;
+            }
+            if (allowedGrades && !allowedGrades.has(grade)) {
+                return false;
+            }
         }
 
-        if (data.wage !== undefined && (!Number.isInteger(data.wage) || data.wage < 0)) {
-            return false;
+        if (data.wage !== undefined) {
+            const wage = Number(data.wage);
+            if (!Number.isFinite(wage) || wage < minWage || wage > maxWage) {
+                return false;
+            }
         }
 
-        if (data.employeeId && (!Number.isInteger(data.employeeId) || data.employeeId <= 0)) {
-            return false;
+        if (data.newWage !== undefined) {
+            const wage = Number(data.newWage);
+            if (!Number.isFinite(wage) || wage < minWage || wage > maxWage) {
+                return false;
+            }
         }
 
-        if (data.citizenid !== undefined && typeof data.citizenid !== 'string') {
+        if (data.newGrade !== undefined) {
+            const grade = Number(data.newGrade);
+            if (!Number.isInteger(grade) || grade < minGrade || grade > maxGrade) {
+                return false;
+            }
+            if (allowedGrades && !allowedGrades.has(grade)) {
+                return false;
+            }
+        }
+
+        if (data.employeeId !== undefined) {
+            const employeeId = Number(data.employeeId);
+            if (!Number.isInteger(employeeId) || employeeId <= 0) {
+                return false;
+            }
+        }
+
+        if (data.citizenid !== undefined && (typeof data.citizenid !== 'string' || data.citizenid.trim() === '')) {
             return false;
         }
 
