@@ -1,5 +1,6 @@
 // Funciones específicas para el manejo de empleados
 const EmployeeManager = {
+    // Implements: IDEA-05 – align UI payload contracts with shared job data
     // Mostrar lista actualizada de empleados
     async showEmployeesList() {
         try {
@@ -303,9 +304,12 @@ const EmployeeManager = {
         const citizenId = confirmButton.data('citizenid');
         const newGrade = parseInt($('#editGrade').val());
         const newWage = parseInt($('#editWage').val());
+        const wageLimits = BusinessAPI?.wageLimits || { min: 0, max: 10000 };
+        const minWage = Number.isFinite(Number(wageLimits.min)) ? Number(wageLimits.min) : 0;
+        const maxWage = Number.isFinite(Number(wageLimits.max)) ? Number(wageLimits.max) : 10000;
 
-        if (!newWage || newWage < 10 || newWage > 100) {
-            BusinessManager.showToast('Invalid wage amount (10-100)', 'error');
+        if (!Number.isFinite(newWage) || newWage < minWage || newWage > maxWage) {
+            BusinessManager.showToast(`Invalid wage amount (${minWage}-${maxWage})`, 'error');
             return;
         }
 

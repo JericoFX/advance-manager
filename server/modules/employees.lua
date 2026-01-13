@@ -8,6 +8,30 @@ local deepClone = lib.table.deepclone
 
 local MIN_WAGE, MAX_WAGE = 0, 10000
 
+-- Implements: IDEA-01 – server-side schema validation for employee operations
+-- Implements: IDEA-04 – normalize and validate identifiers
+local function normalizeBusinessId(businessId)
+    local numericId = tonumber(businessId)
+    if not numericId or numericId <= 0 then
+        return nil
+    end
+
+    return math.floor(numericId)
+end
+
+local function normalizeCitizenId(citizenId)
+    if type(citizenId) ~= 'string' then
+        return nil
+    end
+
+    local sanitized = citizenId:match('^%s*(.-)%s*$')
+    if sanitized == '' then
+        return nil
+    end
+
+    return sanitized
+end
+
 function Employees.GetWageLimits()
     return MIN_WAGE, MAX_WAGE
 end
@@ -219,9 +243,15 @@ end
 
 -- Función para obtener un empleado específico por negocio y citizen
 function Employees.GetByBusinessAndCitizen(businessId, citizenId)
-    local employees = Employees.GetFromCache(businessId)
+    local normalizedBusinessId = normalizeBusinessId(businessId)
+    local normalizedCitizenId = normalizeCitizenId(citizenId)
+    if not normalizedBusinessId or not normalizedCitizenId then
+        return nil
+    end
+
+    local employees = Employees.GetFromCache(normalizedBusinessId)
     for _, employee in pairs(employees) do
-        if employee.citizenid == citizenId then
+        if employee.citizenid == normalizedCitizenId then
             return employee
         end
     end
@@ -230,14 +260,20 @@ end
 
 -- Función para verificar si un ciudadano es empleado de un negocio
 function Employees.IsEmployeeOfBusiness(businessId, citizenId)
+    local normalizedBusinessId = normalizeBusinessId(businessId)
+    local normalizedCitizenId = normalizeCitizenId(citizenId)
+    if not normalizedBusinessId or not normalizedCitizenId then
+        return false
+    end
+
     local employee = Employees.GetByBusinessAndCitizen(businessId, citizenId)
     if employee then
         return true
     end
 
-    local result = MySQL.query.await('SELECT id FROM business_employees WHERE business_id = ? AND citizenid = ? LIMIT 1', {businessId, citizenId})
+    local result = MySQL.query.await('SELECT id FROM business_employees WHERE business_id = ? AND citizenid = ? LIMIT 1', {normalizedBusinessId, normalizedCitizenId})
     if result and result[1] then
-        Employees.RefreshCache(businessId)
+        Employees.RefreshCache(normalizedBusinessId)
         return true
     end
 
@@ -251,7 +287,13 @@ function Employees.GetEmployeeGrade(businessId, citizenId)
 end
 
 function Employees.Hire(businessId, citizenId, grade, wage)
-    local business = Business.GetById(businessId)
+    local normalizedBusinessId = normalizeBusinessId(businessId)
+    local normalizedCitizenId = normalizeCitizenId(citizenId)
+    if not normalizedBusinessId or not normalizedCitizenId then
+        return false, 'Invalid request'
+    end
+
+    local business = Business.GetById(normalizedBusinessId)
     if not business then
         return false, 'Business not found'
     end
@@ -267,13 +309,13 @@ function Employees.Hire(businessId, citizenId, grade, wage)
     end
     
     -- Check if already employed
-    local existing = MySQL.query.await('SELECT id FROM business_employees WHERE business_id = ? AND citizenid = ?', {businessId, citizenId})
+    local existing = MySQL.query.await('SELECT id FROM business_employees WHERE business_id = ? AND citizenid = ?', {normalizedBusinessId, normalizedCitizenId})
     if existing and existing[1] then
         return false, 'Employee already hired'
     end
     
     -- Set job for player
-    local Player = QBCore.Functions.GetPlayerByCitizenId(citizenId)
+    local Player = QBCore.Functions.GetPlayerByCitizenId(normalizedCitizenId)
     if Player then
         Player.Functions.SetJob(business.job_name, sanitizedGrade)
     end
@@ -284,11 +326,11 @@ function Employees.Hire(businessId, citizenId, grade, wage)
     local result = MySQL.insert.await([[ 
         INSERT INTO business_employees (business_id, citizenid, grade, wage)
         VALUES (?, ?, ?, ?)
-    ]], {businessId, citizenId, sanitizedGrade, resolvedWage})
+    ]], {normalizedBusinessId, normalizedCitizenId, sanitizedGrade, resolvedWage})
     
     if result then
         -- Refresh cache for this business
-        Employees.RefreshCache(businessId)
+        Employees.RefreshCache(normalizedBusinessId)
         return true, 'Employee hired successfully'
     else
         return false, 'Failed to hire employee'
@@ -296,23 +338,29 @@ function Employees.Hire(businessId, citizenId, grade, wage)
 end
 
 function Employees.Fire(businessId, citizenId)
-    local business = Business.GetById(businessId)
+    local normalizedBusinessId = normalizeBusinessId(businessId)
+    local normalizedCitizenId = normalizeCitizenId(citizenId)
+    if not normalizedBusinessId or not normalizedCitizenId then
+        return false, 'Invalid request'
+    end
+
+    local business = Business.GetById(normalizedBusinessId)
     if not business then
         return false, 'Business not found'
     end
     
     -- Set job to unemployed
-    local Player = QBCore.Functions.GetPlayerByCitizenId(citizenId)
+    local Player = QBCore.Functions.GetPlayerByCitizenId(normalizedCitizenId)
     if Player then
         Player.Functions.SetJob('unemployed', 0)
     end
     
     -- Remove from database
-    local result = MySQL.update.await('DELETE FROM business_employees WHERE business_id = ? AND citizenid = ?', {businessId, citizenId})
+    local result = MySQL.update.await('DELETE FROM business_employees WHERE business_id = ? AND citizenid = ?', {normalizedBusinessId, normalizedCitizenId})
     
     if result > 0 then
         -- Refresh cache for this business
-        Employees.RefreshCache(businessId)
+        Employees.RefreshCache(normalizedBusinessId)
         return true, 'Employee fired successfully'
     else
         return false, 'Employee not found'
@@ -320,12 +368,17 @@ function Employees.Fire(businessId, citizenId)
 end
 
 function Employees.GetAll(businessId)
+    local normalizedBusinessId = normalizeBusinessId(businessId)
+    if not normalizedBusinessId then
+        return {}
+    end
+
     local result = MySQL.query.await([[
         SELECT be.*, p.charinfo
         FROM business_employees be
         LEFT JOIN players p ON p.citizenid = be.citizenid
         WHERE be.business_id = ?
-    ]], {businessId})
+    ]], {normalizedBusinessId})
     
     local employees = {}
     if result then
@@ -347,16 +400,22 @@ function Employees.GetAll(businessId)
 end
 
 function Employees.UpdateWage(businessId, citizenId, newWage)
+    local normalizedBusinessId = normalizeBusinessId(businessId)
+    local normalizedCitizenId = normalizeCitizenId(citizenId)
+    if not normalizedBusinessId or not normalizedCitizenId then
+        return false
+    end
+
     local sanitizedWage = sanitizeWage(newWage)
     local result = MySQL.update.await([[
         UPDATE business_employees
         SET wage = ?
         WHERE business_id = ? AND citizenid = ?
-    ]], {sanitizedWage, businessId, citizenId})
+    ]], {sanitizedWage, normalizedBusinessId, normalizedCitizenId})
     
     if result > 0 then
         -- Refresh cache for this business
-        Employees.RefreshCache(businessId)
+        Employees.RefreshCache(normalizedBusinessId)
         return true
     else
         return false
@@ -364,7 +423,13 @@ function Employees.UpdateWage(businessId, citizenId, newWage)
 end
 
 function Employees.UpdateGrade(businessId, citizenId, newGrade)
-    local business = Business.GetById(businessId)
+    local normalizedBusinessId = normalizeBusinessId(businessId)
+    local normalizedCitizenId = normalizeCitizenId(citizenId)
+    if not normalizedBusinessId or not normalizedCitizenId then
+        return false, 'Invalid request'
+    end
+
+    local business = Business.GetById(normalizedBusinessId)
     if not business then
         return false, 'Business not found'
     end
@@ -376,13 +441,13 @@ function Employees.UpdateGrade(businessId, citizenId, newGrade)
     end
 
     -- Update player job grade
-    local Player = QBCore.Functions.GetPlayerByCitizenId(citizenId)
+    local Player = QBCore.Functions.GetPlayerByCitizenId(normalizedCitizenId)
     if Player then
         Player.Functions.SetJob(business.job_name, sanitizedGrade)
     end
 
-    local employee = Employees.GetByBusinessAndCitizen(businessId, citizenId)
-    local fallbackWage = employee and employee.wage or getEmployeeWageFromDb(businessId, citizenId)
+    local employee = Employees.GetByBusinessAndCitizen(normalizedBusinessId, normalizedCitizenId)
+    local fallbackWage = employee and employee.wage or getEmployeeWageFromDb(normalizedBusinessId, normalizedCitizenId)
     local resolvedWage = resolveGradeWage(jobInfo, sanitizedGrade, fallbackWage)
 
     -- Update database
@@ -390,11 +455,11 @@ function Employees.UpdateGrade(businessId, citizenId, newGrade)
         UPDATE business_employees
         SET grade = ?, wage = ?
         WHERE business_id = ? AND citizenid = ?
-    ]], {sanitizedGrade, resolvedWage, businessId, citizenId})
+    ]], {sanitizedGrade, resolvedWage, normalizedBusinessId, normalizedCitizenId})
     
     if result > 0 then
         -- Refresh cache for this business
-        Employees.RefreshCache(businessId)
+        Employees.RefreshCache(normalizedBusinessId)
         return true
     else
         return false
